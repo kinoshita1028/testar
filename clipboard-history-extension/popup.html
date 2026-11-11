@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>コピー履歴 & 保管庫</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<header>
+  <div class="tabs" role="tablist">
+    <button id="tab-history" class="tab active" role="tab" aria-selected="true">履歴 <span id="count-history" class="count"></span></button>
+    <button id="tab-vault" class="tab" role="tab" aria-selected="false">★ 保管庫 <span id="count-vault" class="count"></span></button>
+  </div>
+  <input id="search" type="search" placeholder="検索…" autocomplete="off">
+</header>
+
+<main id="list" aria-live="polite"></main>
+
+<footer>
+  <label class="pause"><input id="paused" type="checkbox"> 記録を一時停止</label>
+  <button id="clear" class="link danger">履歴を全削除</button>
+</footer>
+
+<div id="toast" role="status"></div>
+<script src="popup.js"></script>
+</body>
+</html>

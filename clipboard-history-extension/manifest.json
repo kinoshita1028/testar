@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "コピー履歴 & 保管庫",
+  "version": "1.0.0",
+  "description": "コピーしたテキストの直近100件を自動で記録し、ずっと残したいものは保管庫に保存できます。",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "unlimitedStorage", "clipboardRead", "clipboardWrite", "offscreen", "alarms"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "コピー履歴 & 保管庫",
+    "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png" }
+  },
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ]
+}
