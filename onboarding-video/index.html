@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>新人の初日</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; }
+  body { display: flex; align-items: center; justify-content: center; }
+  svg { width: 100vw; height: 56.25vw; max-height: 100vh; max-width: 177.78vh; display: block; }
+</style>
+</head>
+<body>
+<svg id="stage" viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg"></svg>
+<script src="film.js"></script>
+<script>
+  // ?t=12.5 freezes one frame (used by the renderer); otherwise loop in real time.
+  const q = new URLSearchParams(location.search);
+  if (q.has('t')) renderAt(parseFloat(q.get('t')));
+  else if (!q.has('still')) {
+    const t0 = performance.now();
+    (function tick(now) { renderAt(((now - t0) / 1000) % FILM.total); requestAnimationFrame(tick); })(t0);
+  }
+</script>
+</body>
+</html>
