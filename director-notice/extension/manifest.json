@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "重要通知ポップアップ",
+  "description": "本部からの重要なお知らせを、設定された日時にポップアップで表示します。",
+  "version": "1.0.0",
+  "minimum_chrome_version": "116",
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "重要通知ポップアップ", "default_popup": "status.html" },
+  "options_page": "status.html",
+  "permissions": ["alarms", "storage", "identity", "identity.email"],
+  "host_permissions": [
+    "https://script.google.com/*",
+    "https://script.googleusercontent.com/*"
+  ],
+  "storage": { "managed_schema": "managed_schema.json" }
+}

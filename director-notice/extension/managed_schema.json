@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "properties": {
+    "apiUrl": {
+      "title": "通知サーバーURL",
+      "description": "Apps Script ウェブアプリのURL（/exec で終わるもの）",
+      "type": "string"
+    },
+    "apiKey": {
+      "title": "APIキー",
+      "description": "スプレッドシートのメニュー「通知管理」で発行されたキー",
+      "type": "string"
+    },
+    "pollMinutes": {
+      "title": "問い合わせ間隔（分）",
+      "description": "通知内容をサーバーへ取りに行く間隔。省略時は5分。",
+      "type": "integer",
+      "minimum": 1
+    },
+    "useGoogleLogin": {
+      "title": "Googleログインで本人確認する",
+      "description": "ウェブアプリを「組織内のユーザーのみ」でデプロイした場合に true にする。",
+      "type": "boolean"
+    }
+  }
+}

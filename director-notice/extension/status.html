@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>重要通知ポップアップ - 状態</title>
+<style>
+  body { width: 360px; margin: 0; padding: 16px; font-family: "Noto Sans JP", "Yu Gothic UI", "Meiryo", sans-serif; font-size: 13px; color: #202124; }
+  h1 { font-size: 15px; margin: 0 0 12px; }
+  dl { display: grid; grid-template-columns: 96px 1fr; gap: 6px 8px; margin: 0 0 12px; }
+  dt { color: #5f6368; } dd { margin: 0; overflow-wrap: anywhere; }
+  .ok { color: #188038; font-weight: bold; } .ng { color: #c5221f; font-weight: bold; }
+  button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid #dadce0; background: #fff; cursor: pointer; }
+  details { margin-top: 14px; border-top: 1px solid #dadce0; padding-top: 10px; }
+  summary { cursor: pointer; color: #5f6368; }
+  label { display: block; margin-top: 8px; color: #5f6368; }
+  input[type=text], input[type=email] { width: 100%; box-sizing: border-box; padding: 5px 6px; font: inherit; }
+  p.note { color: #5f6368; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>重要通知ポップアップ</h1>
+<dl>
+  <dt>状態</dt><dd id="state">確認中…</dd>
+  <dt>アカウント</dt><dd id="email"></dd>
+  <dt>所属</dt><dd id="school"></dd>
+  <dt>最終同期</dt><dd id="last"></dd>
+  <dt>設定</dt><dd id="source"></dd>
+  <dt>バージョン</dt><dd id="version"></dd>
+</dl>
+<button id="sync" type="button">今すぐ同期</button>
+
+<details id="manual">
+  <summary>動作確認用の手動設定</summary>
+  <p class="note">管理コンソールから設定が配布されていない場合のみ使われます。</p>
+  <label>通知サーバーURL<input id="apiUrl" type="text"></label>
+  <label>APIキー<input id="apiKey" type="text"></label>
+  <label>テスト用メールアドレス（Chrome未ログイン時のみ）<input id="testEmail" type="email"></label>
+  <p><button id="save" type="button">保存して同期</button></p>
+</details>
+<script src="status.js"></script>
+</body>
+</html>
