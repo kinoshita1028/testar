@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Meet Stage - 画面共有コントローラー",
+  "short_name": "Meet Stage",
+  "version": "0.1.0",
+  "description": "投影(共有)用ウィンドウと操作用サイドバーを分け、ワンクリックで映す画面を切り替えます。",
+  "minimum_chrome_version": "116",
+  "permissions": ["sidePanel", "tabs", "storage", "scripting", "system.display"],
+  "host_permissions": ["https://meet.google.com/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Meet Stage を開く" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "content_scripts": [
+    { "matches": ["https://meet.google.com/*"], "js": ["content.js"], "run_at": "document_idle" }
+  ],
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+}
