@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Meet Stage - 画面共有コントローラー",
   "short_name": "Meet Stage",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "投影(共有)用ウィンドウと操作用サイドバーを分け、ワンクリックで映す画面を切り替えます。",
   "minimum_chrome_version": "116",
   "permissions": ["sidePanel", "tabs", "storage", "scripting", "system.display"],

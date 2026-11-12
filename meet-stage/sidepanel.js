@@ -3,7 +3,14 @@
 // そこでアクティブにするタブをサイドパネルから切り替える。
 
 const STANDBY_URL = chrome.runtime.getURL('standby.html');
+const VIEWER_URL = chrome.runtime.getURL('viewer.html');
 const MEET_URL = 'https://meet.google.com/';
+const isViewer = (tab) => Boolean(tab.url?.startsWith(VIEWER_URL));
+
+// 他アプリのウィンドウ/画面のキャプチャ映像。tabId -> MediaStream
+// 映像はこのサイドパネルが保持するため、サイドパネルを閉じるとキャプチャも終了する。
+const captures = new Map();
+let captureCount = 0;
 const $ = (id) => document.getElementById(id);
 
 // ---------- 投影ウィンドウ ----------
@@ -44,7 +51,8 @@ async function closeStage() {
   if (!stage) return;
   // 投影していたタブは閉じずに元のウィンドウへ戻す
   for (const tab of stage.tabs) {
-    if (tab.url !== STANDBY_URL) await returnTab(tab.id, { skipStandby: true });
+    if (isViewer(tab)) stopCapture(tab.id);
+    else if (tab.url !== STANDBY_URL) await returnTab(tab.id, { skipStandby: true });
   }
   await chrome.windows.remove(stage.id).catch(() => {});
   await chrome.storage.session.remove(['stageWindowId', 'origins']);
@@ -105,6 +113,58 @@ async function returnTab(tabId, { skipStandby = false } = {}) {
   }
 }
 
+// ---------- 他アプリのウィンドウ / 画面 ----------
+
+function stopCapture(tabId) {
+  captures.get(tabId)?.getTracks().forEach((t) => t.stop());
+  captures.delete(tabId);
+}
+
+async function addCapture() {
+  // クリック直後でないと選択ダイアログを出せないので、最初に呼ぶ
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
+  } catch (e) {
+    if (e.name === 'NotAllowedError') return; // 選択ダイアログをキャンセルした
+    throw e;
+  }
+  const track = stream.getVideoTracks()[0];
+  const kind = { monitor: '画面', window: 'ウィンドウ', browser: 'タブ' }[track.getSettings().displaySurface] ?? 'キャプチャ';
+  const name = `${kind} ${++captureCount}`;
+
+  let tab;
+  try {
+    const stage = await openStage();
+    tab = await chrome.tabs.create({ windowId: stage.id, url: VIEWER_URL, active: true });
+    const view = await waitForView(tab.id);
+    view.attachStream(stream, name);
+  } catch (e) {
+    track.stop();
+    if (tab) await chrome.tabs.remove(tab.id).catch(() => {});
+    throw e;
+  }
+  captures.set(tab.id, stream);
+  // 元のアプリを閉じた / Chromeの「共有を停止」を押したとき
+  track.addEventListener('ended', () => { captures.delete(tab.id); scheduleRender(); });
+}
+
+async function waitForView(tabId) {
+  for (let i = 0; i < 50; i++) {
+    const view = chrome.extension.getViews({ tabId })[0];
+    if (view?.attachStream) return view;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error('投影ウィンドウにキャプチャを表示できませんでした');
+}
+
+async function removeCapture(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  if (tab.active) await showStandby();
+  stopCapture(tabId);
+  await chrome.tabs.remove(tabId);
+}
+
 // ---------- Google Meet ----------
 
 async function sendToMeet(tabId, type) {
@@ -152,12 +212,20 @@ function run(fn) {
   };
 }
 
-function tabRow(tab, { onClick, active = false, onReturn = null }) {
+function tabRow(tab, { onClick, active = false, onReturn = null, returnLabel = '戻す' }) {
   const li = document.createElement('li');
   const btn = document.createElement('button');
   btn.className = 'tab' + (active ? ' active' : '');
   btn.title = tab.title || tab.url || '';
-  if (tab.favIconUrl && /^(https?|data):/.test(tab.favIconUrl)) {
+  const stream = captures.get(tab.id);
+  if (stream) {
+    const thumb = document.createElement('video');
+    thumb.className = 'thumb';
+    thumb.muted = true;
+    thumb.autoplay = true;
+    thumb.srcObject = stream;
+    btn.append(thumb);
+  } else if (tab.favIconUrl && /^(https?|data):/.test(tab.favIconUrl)) {
     const img = document.createElement('img');
     img.src = tab.favIconUrl;
     img.alt = '';
@@ -179,8 +247,8 @@ function tabRow(tab, { onClick, active = false, onReturn = null }) {
   if (onReturn) {
     const back = document.createElement('button');
     back.className = 'icon-btn';
-    back.textContent = '戻す';
-    back.title = '投影ウィンドウから外して元のウィンドウへ戻す';
+    back.textContent = returnLabel;
+    back.title = returnLabel === '削除' ? 'キャプチャを終了して一覧から外す' : '投影ウィンドウから外して元のウィンドウへ戻す';
     back.addEventListener('click', run(onReturn));
     li.append(back);
   }
@@ -244,7 +312,8 @@ async function render() {
       stageList.append(tabRow(tab, {
         active: tab.active,
         onClick: () => chrome.tabs.update(tab.id, { active: true }),
-        onReturn: isStandby ? null : () => returnTab(tab.id),
+        onReturn: isStandby ? null : isViewer(tab) ? () => removeCapture(tab.id) : () => returnTab(tab.id),
+        returnLabel: isViewer(tab) ? '削除' : '戻す',
       }));
     }
   } else {
@@ -266,6 +335,7 @@ async function render() {
 
 $('open-stage').addEventListener('click', run(openStage));
 $('standby').addEventListener('click', run(showStandby));
+$('add-capture').addEventListener('click', run(addCapture));
 $('fullscreen').addEventListener('click', run(toggleFullscreen));
 $('close-stage').addEventListener('click', run(closeStage));
 
@@ -279,5 +349,6 @@ for (const ev of ['onCreated', 'onRemoved', 'onUpdated', 'onMoved', 'onActivated
 }
 chrome.windows.onRemoved.addListener(scheduleRender);
 chrome.windows.onCreated.addListener(scheduleRender);
+chrome.tabs.onRemoved.addListener((tabId) => stopCapture(tabId));
 
 render();

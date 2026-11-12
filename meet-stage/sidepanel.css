@@ -41,3 +41,6 @@ ul.tabs li { display: flex; gap: 4px; }
 .meet .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #toast { position: fixed; left: 12px; right: 12px; bottom: 12px; padding: 8px 12px; border-radius: 8px;
          background: #323232; color: #fff; font-size: 12px; }
+.tab .thumb { flex: none; width: 64px; height: 36px; object-fit: contain; background: #000; border-radius: 4px; }
+.row.add { margin: 8px 0 4px; }
+.row.add + .hint { margin: 0; }
