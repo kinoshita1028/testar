@@ -8,7 +8,7 @@
 
   const TAG = 'meet-stage';
   const md = navigator.mediaDevices;
-  const realGetDisplayMedia = md.getDisplayMedia.bind(md);
+  const realGetDisplayMedia = MediaDevices.prototype.getDisplayMedia.bind(md);
   const KIND = { monitor: '画面', window: 'ウィンドウ', browser: 'タブ' };
 
   const sources = new Map(); // id -> { id, name, kind, track, video }
@@ -22,6 +22,7 @@
     type: 'state',
     presenting: Boolean(program),
     liveId: program?.liveId ?? null,
+    frames: program?.frames ?? 0,
     sources: [...sources.values()].map(({ id, name, kind }) => ({ id, name, kind })),
   });
   const pushState = () => post(state());
@@ -31,9 +32,24 @@
   function startProgram(id) {
     const gen = new MediaStreamTrackGenerator({ kind: 'video' });
     gen.contentHint = 'detail';
-    program = { gen, writer: gen.writable.getWriter(), liveId: null, token: 0 };
+    program = { gen, writer: gen.writable.getWriter(), liveId: null, token: 0, frames: 0 };
+    disguise(gen);
     switchTo(id);
     return new MediaStream([gen]);
+  }
+
+  // Meetは受け取った映像を「本物の画面共有」として扱おうとするので、
+  // 設定の問い合わせには今流しているソースの値を返し、設定変更の要求は受け流す
+  function disguise(gen) {
+    const live = () => sources.get(program?.liveId)?.track;
+    const own = gen.getSettings.bind(gen);
+    try {
+      gen.getSettings = () => ({ ...(live()?.getSettings() ?? { displaySurface: 'window' }), ...own() });
+      gen.getCapabilities = () => live()?.getCapabilities() ?? {};
+      gen.getConstraints = () => ({});
+      gen.applyConstraints = () => Promise.resolve();
+      Object.defineProperty(gen, 'label', { get: () => live()?.label ?? 'Meet Stage' });
+    } catch { /* 上書きできなくても共有自体は続ける */ }
   }
 
   function endProgram() {
@@ -52,7 +68,7 @@
   };
 
   async function write(p, frame) {
-    try { await p.writer.write(frame); } catch { /* 共有が終了した */ }
+    try { await p.writer.write(frame); p.frames++; } catch { /* 共有が終了した */ }
     try { frame.close(); } catch { /* 書き込み側で解放済み */ }
   }
 
@@ -94,7 +110,9 @@
 
   // ---- getDisplayMedia の差し替え ----
 
-  md.getDisplayMedia = function (constraints) {
+  // Meetがどの呼び方をしても差し替わるよう、prototype側を置き換える
+  delete md.getDisplayMedia;
+  MediaDevices.prototype.getDisplayMedia = function (constraints) {
     if (armedId != null && sources.has(armedId)) {
       const id = armedId;
       armedId = null;
@@ -151,7 +169,7 @@
       post({ type: 'thumb', id, url: canvas.toDataURL('image/jpeg', 0.6) });
     }
   }
-  setInterval(pushThumbs, 2000);
+  setInterval(() => { pushThumbs(); if (program) pushState(); }, 2000);
 
   // ---- 操作用ウィンドウからの指示(content.js経由) ----
 
@@ -175,12 +193,12 @@
       } else if (type === 'arm') {
         armedId = id;
         clearTimeout(armedTimer);
-        armedTimer = setTimeout(() => { armedId = null; }, 5000);
+        armedTimer = setTimeout(() => { armedId = null; }, 30000);
         reply({ ok: sources.has(id) });
       } else if (type === 'state') {
         pushState();
         pushThumbs();
-        reply({ ok: true });
+        reply({ ok: true, presenting: Boolean(program) });
       }
     } catch (e) {
       reply({ ok: false, error: e.name === 'NotAllowedError' ? 'cancelled' : `${e.name}: ${e.message}` });

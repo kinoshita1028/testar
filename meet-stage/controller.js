@@ -33,7 +33,7 @@ async function connect() {
     } else if (msg.type === 'thumb') {
       thumbs.set(msg.id, msg.url);
       const img = document.querySelector(`[data-thumb="${msg.id}"]`);
-      if (img) img.src = msg.url; else render();
+      if (img) img.src = msg.url;
     }
   });
   port.onDisconnect.addListener(() => {
@@ -68,6 +68,16 @@ async function addSource() {
   await chrome.windows.update(me.id, { focused: true });
 }
 
+async function show(id) {
+  const res = await send({ type: 'show', id });
+  if (res.manual) {
+    // 自動で共有を始められなかったので、Meetを前面に出して利用者に押してもらう
+    await chrome.tabs.update(meetTab.id, { active: true });
+    await chrome.windows.update(meetTab.windowId, { focused: true });
+    toast('Meetの「画面を共有」ボタンを30秒以内に押してください。選択ダイアログは出ず、選んだ画面が共有されます。');
+  }
+}
+
 // ---------- 描画 ----------
 
 let toastTimer;
@@ -82,6 +92,7 @@ const run = (fn) => async () => {
   try { await fn(); } catch (e) { console.error(e); toast(`エラー: ${e.message}`); }
 };
 
+let listSignature = '';
 function render() {
   const live = state.sources.find((s) => s.id === state.liveId);
   const status = $('status');
@@ -96,10 +107,16 @@ function render() {
     status.className = 'status off';
   }
   $('stop').hidden = !state.presenting;
+  $('diag').hidden = !state.presenting;
+  $('diag').textContent = `送出フレーム数: ${state.frames ?? 0}`;
   $('no-meet').hidden = Boolean(meetTab);
   $('main').hidden = !meetTab;
   $('empty').hidden = state.sources.length > 0;
 
+  // 一覧は内容が変わったときだけ作り直す(定期更新のたびに作り直すとクリックを取りこぼす)
+  const signature = JSON.stringify([state.presenting, state.liveId, state.sources]);
+  if (signature === listSignature) return;
+  listSignature = signature;
   const list = $('sources');
   list.replaceChildren();
   for (const src of state.sources) {
@@ -123,7 +140,7 @@ function render() {
     sub.textContent = isLive ? '● お客様に表示中' : src.kind;
     meta.append(name, sub);
     btn.append(img, meta);
-    btn.addEventListener('click', run(() => send({ type: 'show', id: src.id })));
+    btn.addEventListener('click', run(() => show(src.id)));
 
     const tools = document.createElement('div');
     tools.className = 'tools';

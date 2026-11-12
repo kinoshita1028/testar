@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Meet Stage - 画面共有コントローラー",
   "short_name": "Meet Stage",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Google Meetでお客様に見せる画面を、操作用の別ウィンドウからワンクリックで切り替えます。",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "scripting"],

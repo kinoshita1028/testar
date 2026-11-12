@@ -59,10 +59,14 @@
         if (res.presenting) return res.ok ? { ok: true } : { ok: false, error: 'そのソースはもうありません' };
         const armed = await ask({ type: 'arm', id: msg.id });
         if (!armed.ok) return { ok: false, error: 'そのソースはもうありません' };
-        const btn = find(PRESENT, STOP);
-        if (!btn) return { ok: false, error: 'Meetの共有ボタンが見つかりません(会議に参加していますか?)' };
-        btn.click();
-        return { ok: true };
+        // Meetの共有ボタンを代わりに押す。押せない/反応しない場合は、利用者自身に押してもらう
+        // (30秒以内に押せば、選択ダイアログなしで選んだソースが共有される)
+        find(PRESENT, STOP)?.click();
+        for (let i = 0; i < 10; i++) {
+          await new Promise((r) => setTimeout(r, 250));
+          if ((await ask({ type: 'state' })).presenting) return { ok: true };
+        }
+        return { ok: true, manual: true };
       }
       case 'stop': {
         const btn = find(STOP);
