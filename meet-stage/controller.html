@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Meet Stage</title>
+<link rel="stylesheet" href="controller.css">
+</head>
+<body>
+  <header>
+    <div id="status" class="status off">Meetを探しています…</div>
+    <button id="stop" class="primary" hidden>共有を停止</button>
+  </header>
+
+  <section id="no-meet" hidden>
+    <p class="hint">Google Meetのタブが見つかりません。Chromeで会議を開くと、ここから操作できます。</p>
+  </section>
+
+  <section id="main" hidden>
+    <div class="head">
+      <h2>お客様に見せる画面</h2>
+      <button id="add" class="add">+ 追加</button>
+    </div>
+    <p id="empty" class="hint">「+ 追加」で、見せたいタブ・ウィンドウ・画面全体を登録します。登録したものはクリックひとつで切り替えられます。</p>
+    <ul id="sources"></ul>
+  </section>
+
+  <div id="toast" role="status" hidden></div>
+  <script src="controller.js"></script>
+</body>
+</html>

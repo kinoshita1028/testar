@@ -1,0 +1,38 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f1f3f4; --card: #fff; --fg: #1f1f1f; --muted: #5f6368; --line: #dadce0;
+  --accent: #0b57d0; --accent-fg: #fff; --live: #d93025;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #1f1f1f; --card: #2a2b2e; --fg: #e8eaed; --muted: #9aa0a6; --line: #3c4043;
+          --accent: #8ab4f8; --accent-fg: #062e6f; --live: #f28b82; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 12px; background: var(--bg); color: var(--fg);
+       font: 13px/1.5 system-ui, "Hiragino Sans", "Noto Sans JP", Meiryo, sans-serif; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 34px; margin-bottom: 12px; }
+.status { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status.off { color: var(--muted); font-weight: 400; }
+.status.live::before { content: "● "; color: var(--live); }
+section { background: var(--card); border-radius: 12px; padding: 12px; }
+.head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+h2 { font-size: 12px; margin: 0; color: var(--muted); font-weight: 600; }
+.hint { margin: 0; color: var(--muted); font-size: 12px; }
+button { font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--line);
+         border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; font-weight: 600; white-space: nowrap; }
+button.add { color: var(--accent); border-color: transparent; font-weight: 600; padding: 4px 8px; }
+ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+li { display: flex; gap: 4px; align-items: stretch; }
+.source { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 6px; text-align: left; border-width: 2px; }
+.source img, .source .ph { flex: none; width: 112px; height: 63px; border-radius: 4px; background: #000; object-fit: contain; }
+.source .meta { flex: 1; min-width: 0; }
+.source .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.source .sub { font-size: 11px; color: var(--muted); }
+.source.live { border-color: var(--live); }
+.source.live .sub { color: var(--live); font-weight: 700; }
+.tools { display: grid; gap: 4px; }
+.tools button { padding: 2px 8px; color: var(--muted); font-size: 12px; }
+#toast { position: fixed; left: 12px; right: 12px; bottom: 12px; padding: 8px 12px; border-radius: 8px;
+         background: #323232; color: #fff; font-size: 12px; }
