@@ -1,0 +1,1579 @@
+<script>
+/* =====================================================================
+   シフト管理 — 画面の動き
+   ・園の画面（月／週／日）… 職員×日付の一覧、編集、承認、配置チェック
+   ・本部の画面 … 複数園の充足状況・不足箇所・勤務時間の比較
+   ===================================================================== */
+(function () {
+  'use strict';
+  var S = Shared, ST = S.STATUS, K = S.KIND;
+
+  // ------------------------------------------------------------------
+  // 小さな道具
+  // ------------------------------------------------------------------
+  var LS = {
+    get: function (k, d) { try { var v = localStorage.getItem('shift.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+    set: function (k, v) { try { localStorage.setItem('shift.' + k, JSON.stringify(v)); } catch (e) { /* 保存できなくても続行 */ } }
+  };
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function $(sel, root) { return (root || document).querySelector(sel); }
+  function $$(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+  function clone(o) { return JSON.parse(JSON.stringify(o)); }
+  function hm(t) { return S.fromMin(t); }
+  function hoursText(min) { return (Math.round(min / 6) / 10).toFixed(1); }
+  function initial(name) { return String(name || '？').replace(/\s/g, '').slice(0, 1); }
+  function surname(name) { return String(name || '').split(/[\s（(]/)[0]; }
+
+  var ICON = {
+    ok: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.5l2.5 2.5L10 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    warn: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 2v5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><circle cx="6" cy="10" r="1.2" fill="currentColor"/></svg>',
+    short: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>'
+  };
+  var CK_LABEL = { ok: '充足', warn: '要確認', short: '不足', na: '判定なし' };
+  function ck(st, text, title) {
+    if (!st || st === 'na') return '<span class="ck na" title="' + esc(title || '判定なし') + '">' + (text === undefined ? '—' : esc(text)) + '</span>';
+    return '<span class="ck ' + st + '" title="' + esc(title || CK_LABEL[st]) + '">' + ICON[st] + (text ? esc(text) : '') + '<span class="sr-only">' + CK_LABEL[st] + '</span></span>';
+  }
+  var STATUS_CLASS = {}; STATUS_CLASS[ST.DRAFT] = 'draft'; STATUS_CLASS[ST.PENDING] = 'pending'; STATUS_CLASS[ST.FIXED] = 'fixed';
+  function statusPill(status) {
+    var c = STATUS_CLASS[status] || 'draft';
+    var icon = c === 'fixed' ? '✓ ' : c === 'pending' ? '◷ ' : '✎ ';
+    return '<span class="status-pill ' + c + '">' + icon + esc(status || ST.DRAFT) + '</span>';
+  }
+
+  // ------------------------------------------------------------------
+  // 状態
+  // ------------------------------------------------------------------
+  var boot = window.BOOT || {};
+  var state = {
+    m: null, today: S.todayJST(), user: null, token: LS.get('token', ''),
+    editor: LS.get('editor', ''),
+    page: boot.page || LS.get('page', 'facility'),
+    facilityId: boot.facilityId || LS.get('facilityId', ''),
+    view: LS.get('view', window.innerWidth < 640 ? 'week' : 'month'),
+    anchor: null,
+    density: LS.get('density', 'normal'),
+    legend: LS.get('legend', window.innerWidth >= 640),
+    classFilter: '',
+    quick: null,
+    shifts: {}, loaded: {}, byDate: null, evalCache: {},
+    hq: { view: LS.get('hqView', 'month'), anchor: null, data: null, expanded: {}, filter: 'all', fac: '', loading: false },
+    sheetUrl: ''
+  };
+
+  // ------------------------------------------------------------------
+  // サーバー呼び出し
+  // ------------------------------------------------------------------
+  var busy = 0;
+  function setBusy(d) {
+    busy = Math.max(0, busy + d);
+    var p = $('#progress');
+    if (p) p.classList.toggle('hidden', busy === 0);
+  }
+  function api(name, req) {
+    setBusy(1);
+    return new Promise(function (resolve, reject) {
+      google.script.run
+        .withSuccessHandler(function (r) { setBusy(-1); resolve(r); })
+        .withFailureHandler(function (e) { setBusy(-1); reject(e); })[name](req || {});
+    });
+  }
+  function errMsg(e) {
+    var m = (e && (e.message || e)) || 'エラーが発生しました';
+    return String(m).replace(/^Error:\s*/, '').replace(/^LOGIN_REQUIRED:\s*/, '');
+  }
+  function handleErr(e, retry) {
+    var m = String((e && e.message) || e || '');
+    if (m.indexOf('LOGIN_REQUIRED') >= 0) {
+      toast(errMsg(e), 'err');
+      openLogin({ reason: errMsg(e), then: retry });
+      return;
+    }
+    toast(errMsg(e), 'err');
+    console.error(e);
+  }
+
+  // ------------------------------------------------------------------
+  // マスタ
+  // ------------------------------------------------------------------
+  var ctxCache = {};
+  function settings() { return S.settingsMap(state.m.settings); }
+  function facility(id) { return state.m.facilities.filter(function (f) { return f.id === (id || state.facilityId); })[0]; }
+  function classesOf(fid) { return state.m.classes.filter(function (c) { return c.facilityId === fid; }).sort(function (a, b) { return S.num(a.order, 99) - S.num(b.order, 99); }); }
+  function classById(id) { return state.m.classes.filter(function (c) { return c.id === id; })[0]; }
+  function staffOf(fid) {
+    return state.m.staff.filter(function (s) { return s.facilityId === fid && S.bool(s.active, true); })
+      .sort(function (a, b) { return S.num(a.order, 999) - S.num(b.order, 999); });
+  }
+  function staffById(id) { return state.m.staff.filter(function (s) { return s.id === id; })[0]; }
+  function patternsOf(fid) { return S.patternsFor(state.m, fid); }
+  function patternOf(name, fid) { return patternsOf(fid || state.facilityId).filter(function (p) { return p.name === name; })[0]; }
+  function ctxOf(fid) { return ctxCache[fid] || (ctxCache[fid] = S.buildContext(state.m, fid)); }
+  function patStyle(s) {
+    var p = s && s.type ? patternOf(s.type) : null;
+    if (p) return { bg: p.bg || '#F4F1EC', bar: p.bar || '#9A8F82', short: p.short || s.type };
+    if (s && s.kind === K.PAID) return { bg: '#FFF6DD', bar: '#C9962A', short: '有' };
+    if (s && (s.kind === K.OFF)) return { bg: '#FFFFFF', bar: '#B5ACA1', short: '休' };
+    return { bg: '#F4F1EC', bar: '#9A8F82', short: (s && s.type) ? s.type.slice(0, 2) : '' };
+  }
+  function canApproveHere() {
+    var u = state.user;
+    if (!u) return false;
+    return u.role === '本部' || ((u.role === '園長' || u.role === '主任') && u.facilityId === state.facilityId);
+  }
+
+  // ------------------------------------------------------------------
+  // 勤務データ（表示中の園）
+  // ------------------------------------------------------------------
+  function monthsBetween(from, to) {
+    var out = [], m = S.monthStart(from);
+    while (m <= to) { out.push(m.slice(0, 7)); m = S.addMonths(m, 1); }
+    return out;
+  }
+  function ensureLoaded(from, to, force) {
+    var fid = state.facilityId;
+    var loaded = state.loaded[fid] || (state.loaded[fid] = {});
+    var need = monthsBetween(from, to).filter(function (ym) { return force || !loaded[ym]; });
+    if (!need.length) return Promise.resolve(false);
+    var f = need[0] + '-01', t = S.monthEnd(need[need.length - 1] + '-01');
+    return api('api_getShifts', { facilityId: fid, from: f, to: t }).then(function (res) {
+      if (fid !== state.facilityId) return false;
+      Object.keys(state.shifts).forEach(function (id) {
+        var s = state.shifts[id];
+        if (s.date >= f && s.date <= t && !s._local) delete state.shifts[id];
+      });
+      res.shifts.forEach(function (s) { if (!(state.shifts[s.id] && state.shifts[s.id]._local)) state.shifts[s.id] = s; });
+      need.forEach(function (ym) { loaded[ym] = true; });
+      dirty();
+      return true;
+    });
+  }
+  function dirty(dates) {
+    state.byDate = null;
+    if (dates) dates.forEach(function (d) { delete state.evalCache[d]; });
+    else state.evalCache = {};
+  }
+  function byDate() {
+    if (state.byDate) return state.byDate;
+    var m = {};
+    Object.keys(state.shifts).forEach(function (id) {
+      var s = state.shifts[id];
+      if (s.facilityId !== state.facilityId) return;
+      (m[s.date] || (m[s.date] = [])).push(s);
+    });
+    state.byDate = m;
+    return m;
+  }
+  function shiftsOn(date) { return byDate()[date] || []; }
+  function getShift(date, staffId) { return state.shifts[date + '_' + staffId] || null; }
+  function shiftsIn(from, to) {
+    var out = [];
+    S.dateRange(from, to).forEach(function (d) { out = out.concat(shiftsOn(d)); });
+    return out;
+  }
+  function evalDay(date) {
+    if (!state.evalCache[date]) state.evalCache[date] = S.evaluateDay(ctxOf(state.facilityId), date, shiftsOn(date));
+    return state.evalCache[date];
+  }
+  function applySaved(res) {
+    var dates = {};
+    (res.saved || res.updated || []).forEach(function (s) { state.shifts[s.id] = s; dates[s.date] = true; });
+    (res.deleted || []).forEach(function (id) { var s = state.shifts[id]; if (s) dates[s.date] = true; delete state.shifts[id]; });
+    dirty(Object.keys(dates));
+  }
+
+  function viewRange(view, anchor) {
+    view = view || state.view; anchor = anchor || state.anchor;
+    if (view === 'month') return { from: S.monthStart(anchor), to: S.monthEnd(anchor) };
+    if (view === 'week') { var w = S.weekStart(anchor); return { from: w, to: S.addDays(w, 6) }; }
+    return { from: anchor, to: anchor };
+  }
+  function rangeTitle(view, anchor) {
+    var y = +anchor.slice(0, 4), mo = +anchor.slice(5, 7), d = +anchor.slice(8, 10);
+    if (view === 'month') return y + '年' + mo + '月';
+    if (view === 'week') { var r = viewRange('week', anchor); return S.mdLabel(r.from) + '〜' + S.mdLabel(r.to); }
+    return mo + '月' + d + '日（' + S.DOW[S.dow(anchor)] + '）';
+  }
+
+  // ------------------------------------------------------------------
+  // 画面の骨組み
+  // ------------------------------------------------------------------
+  function shell() {
+    $('#app').innerHTML =
+      '<div class="progress hidden" id="progress"></div>' +
+      (window.__PREVIEW__ ? '<div class="preview-banner"><b>プレビュー版</b><span>入力内容はこのブラウザ内に保存されます（GAS版では指定のGoogleスプレッドシートに保存）</span><button data-act="preview-reset">デモデータに戻す</button></div>' : '') +
+      '<header class="topbar" id="topbar"></header>' +
+      '<div id="page"></div>' +
+      '<div id="quick"></div>' +
+      '<div class="toasts" id="toasts" aria-live="polite"></div>' +
+      '<div id="modals"></div>';
+  }
+  var BRAND_SVG = '<svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="19" fill="#FCE9E1"/>' +
+    '<g fill="#E98B6D"><circle cx="20" cy="11.5" r="5"/><circle cx="28.1" cy="17.4" r="5"/><circle cx="25" cy="26.9" r="5"/><circle cx="15" cy="26.9" r="5"/><circle cx="11.9" cy="17.4" r="5"/></g>' +
+    '<circle cx="20" cy="20" r="4.2" fill="#FFD27A"/></svg>';
+
+  function renderTopbar() {
+    var st = settings();
+    var u = state.user;
+    var chip;
+    if (u) {
+      chip = '<button class="user-chip approver" data-act="user" aria-label="ログイン中のアカウント"><span class="avatar">印</span><span class="who"><small>' + esc(u.role) + '</small>' + esc(u.name) + '</span></button>';
+    } else {
+      chip = '<button class="user-chip" data-act="user" aria-label="入力者の変更・ログイン"><span class="avatar">' + esc(initial(state.editor || '?')) + '</span><span class="who"><small>入力者</small>' + esc(state.editor || '未選択') + '</span></button>';
+    }
+    $('#topbar').innerHTML =
+      '<div class="brand">' + BRAND_SVG + '<div class="brand-text"><div class="brand-title">シフト管理</div><div class="brand-sub">' + esc(st.orgName || '') + '</div></div></div>' +
+      '<nav class="page-tabs" aria-label="画面の切り替え">' +
+      '<button data-act="page" data-page="facility" aria-pressed="' + (state.page === 'facility') + '">園の画面</button>' +
+      '<button data-act="page" data-page="hq" aria-pressed="' + (state.page === 'hq') + '">本部の画面</button></nav>' +
+      '<div class="topbar-right">' + chip + '</div>';
+  }
+
+  function render() {
+    renderTopbar();
+    if (state.page === 'hq') renderHQ();
+    else renderFacility();
+    renderQuickbar();
+  }
+
+  // ------------------------------------------------------------------
+  // 園の画面
+  // ------------------------------------------------------------------
+  function renderFacility() {
+    var page = $('#page');
+    var keep = keepScroll();
+    var r = viewRange();
+    page.innerHTML = toolbarHTML(r) + legendHTML() + filterHTML() + '<div id="view"></div>';
+    var v = $('#view');
+    var loaded = state.loaded[state.facilityId] || {};
+    if (monthsBetween(r.from, r.to).some(function (ym) { return !loaded[ym]; })) {
+      v.innerHTML = '<div class="empty-note"><div class="spinner" style="margin:0 auto 10px"></div>勤務を読み込んでいます…</div>';
+      return;
+    }
+    if (state.view === 'month') v.innerHTML = rosterHTML(r, 'month');
+    else if (state.view === 'week') v.innerHTML = rosterHTML(r, 'week');
+    else v.innerHTML = dayHTML(state.anchor);
+    document.body.classList.toggle('quick-on', !!state.quick);
+    restoreScroll(keep);
+  }
+  function keepScroll() {
+    var g = $('.grid-wrap');
+    if (!g) return null;
+    return { x: g ? g.scrollLeft : 0, y: g ? g.scrollTop : 0, view: state.view, anchor: state.anchor, fid: state.facilityId, wy: window.scrollY };
+  }
+  function restoreScroll(k) {
+    var g = $('.grid-wrap');
+    if (!g) return;
+    if (k && k.view === state.view && k.anchor === state.anchor && k.fid === state.facilityId) {
+      g.scrollLeft = k.x; g.scrollTop = k.y; window.scrollTo(0, k.wy);
+    } else if (state.view === 'month') {
+      // 今日の列が見えるように
+      var th = $('th.today', g);
+      if (th) g.scrollLeft = Math.max(0, th.offsetLeft - g.clientWidth / 3);
+    } else if (state.view === 'day') {
+      g.scrollLeft = 0;
+    }
+  }
+
+  function toolbarHTML(r) {
+    var fac = facility();
+    var counts = S.statusCounts(shiftsIn(r.from, r.to).filter(function (s) { return s.type || S.hasTimes(s) || s.status !== ST.FIXED; }));
+    var tot = Math.max(1, counts.total);
+    var fixedAll = counts.total > 0 && counts.fixed === counts.total;
+    var stamp;
+    if (fixedAll) {
+      var last = shiftsIn(r.from, r.to).filter(function (s) { return s.approvedAt; }).sort(function (a, b) { return a.approvedAt < b.approvedAt ? 1 : -1; })[0];
+      var who = last ? surname(last.approver) : '承認';
+      var when = last ? (+last.approvedAt.slice(5, 7)) + '/' + (+last.approvedAt.slice(8, 10)) : '';
+      stamp = '<span class="stamp-mini" title="すべて確定済み（' + esc(last ? last.approver : '') + '）">' + esc(who.slice(0, 3)) + '<br>' + esc(when) + '</span>';
+    } else {
+      stamp = '<span class="stamp-mini empty" title="未確定の勤務があります">未</span>';
+    }
+    var facOpts = state.m.facilities.map(function (f) {
+      return '<option value="' + esc(f.id) + '"' + (f.id === state.facilityId ? ' selected' : '') + '>' + esc(f.name) + '</option>';
+    }).join('');
+    return '<div class="toolbar"><div class="tgroup">' +
+      '<select class="select facility-select" data-change="facility" aria-label="園を選ぶ">' + facOpts + '</select>' +
+      '<div class="seg" role="group" aria-label="表示期間">' +
+      ['month', 'week', 'day'].map(function (v) { return '<button data-act="view" data-view="' + v + '" aria-pressed="' + (state.view === v) + '">' + { month: '月', week: '週', day: '日' }[v] + '</button>'; }).join('') +
+      '</div>' +
+      '<div class="date-nav">' +
+      '<button class="btn icon" data-act="nav" data-dir="-1" aria-label="前へ">◀</button>' +
+      '<label class="date-title" title="日付を選ぶ">' + esc(rangeTitle(state.view, state.anchor)) + '<input type="date" data-change="date" value="' + esc(state.anchor) + '" aria-label="日付を選ぶ"></label>' +
+      '<button class="btn icon" data-act="nav" data-dir="1" aria-label="次へ">▶</button>' +
+      '<button class="btn small" data-act="nav" data-dir="0">今日</button>' +
+      '</div></div>' +
+      '<div class="tgroup right">' +
+      '<div class="status-strip" title="表示中の期間の承認状況">' + stamp +
+      '<div><div class="bar"><i style="width:' + (counts.fixed / tot * 100) + '%;background:var(--fixed)"></i><i style="width:' + (counts.pending / tot * 100) + '%;background:var(--warn-line)"></i><i style="width:' + (counts.draft / tot * 100) + '%;background:var(--draft)"></i></div>' +
+      '<div class="lbl">確定 <b>' + counts.fixed + '</b>・承認待ち <b>' + counts.pending + '</b>・変更中 <b>' + counts.draft + '</b></div></div></div>' +
+      '<button class="btn" data-act="request"' + (counts.draft ? '' : ' disabled') + '>承認依頼<span class="count">' + counts.draft + '</span></button>' +
+      '<button class="btn stamp" data-act="approve">承認印<span class="count">' + counts.pending + '</span></button>' +
+      '<button class="btn' + (state.quick ? ' on' : '') + '" data-act="quick" aria-pressed="' + (!!state.quick) + '">かんたん入力</button>' +
+      '<button class="btn" data-act="menu" aria-label="その他のメニュー">⋯<span class="lbl-long">メニュー</span></button>' +
+      '</div></div>';
+  }
+
+  function legendHTML() {
+    if (!state.legend) return '<div class="legend"><button class="btn small ghost legend-toggle" data-act="legend">凡例を表示</button></div>';
+    var pats = patternsOf(state.facilityId).filter(function (p) { return p.kind === K.WORK || p.kind === K.TRAIN; });
+    return '<div class="legend">' +
+      pats.map(function (p) {
+        return '<span class="item"><span class="sw" style="background:' + esc(p.bg) + ';border-color:' + esc(p.bar) + '"></span>' + esc(p.name) +
+          (p.start ? ' <span class="num muted">' + esc(p.start) + '〜' + esc(p.end) + '</span>' : '') + '</span>';
+      }).join('') +
+      '<span class="sep"></span>' +
+      '<span class="item"><span class="status-pill fixed">✓ 確定</span></span>' +
+      '<span class="item"><span class="status-pill pending">◷ 承認待ち</span></span>' +
+      '<span class="item"><span class="status-pill draft">✎ 変更中</span></span>' +
+      '<span class="sep"></span>' +
+      '<span class="item">' + ck('ok') + '充足</span><span class="item">' + ck('warn') + '要確認</span><span class="item">' + ck('short') + '不足</span>' +
+      '<span class="item"><span class="qual">資</span>有資格</span><span class="item"><span class="qual no">補</span>補助者</span>' +
+      '<button class="btn small ghost legend-toggle" data-act="legend">凡例を隠す</button></div>';
+  }
+
+  function filterHTML() {
+    if (state.view === 'day') return '';
+    var cls = classesOf(state.facilityId);
+    var chips = '<button class="chip" data-act="cls" data-cls="" aria-pressed="' + (!state.classFilter) + '">全員</button>' +
+      cls.map(function (c) {
+        return '<button class="chip" data-act="cls" data-cls="' + esc(c.id) + '" aria-pressed="' + (state.classFilter === c.id) + '"><span class="dot" style="background:' + esc(c.color) + '"></span>' + esc(c.name) + '</button>';
+      }).join('') +
+      '<button class="chip" data-act="cls" data-cls="_free" aria-pressed="' + (state.classFilter === '_free') + '">フリー・その他</button>';
+    return '<div class="filter-row" role="group" aria-label="クラスで絞り込み">' + chips + '</div>';
+  }
+
+  /** 表示する職員のまとまり（クラスごと → フリー → 配置外） */
+  function staffGroups(fid, ignoreFilter) {
+    var cls = classesOf(fid), staff = staffOf(fid);
+    var groups = cls.map(function (c) { return { key: c.id, cls: c, label: c.name, staff: [] }; });
+    var byKey = {};
+    groups.forEach(function (g) { byKey[g.key] = g; });
+    var free = { key: '_free', label: 'フリー・園長・看護師など', staff: [] };
+    var out = { key: '_out', label: '配置外（調理・事務など）', staff: [] };
+    staff.forEach(function (s) {
+      if (!S.bool(s.counted, false)) out.staff.push(s);
+      else if (s.classId && byKey[s.classId]) byKey[s.classId].staff.push(s);
+      else free.staff.push(s);
+    });
+    var all = groups.concat([free, out]).filter(function (g) { return g.staff.length || g.cls; });
+    if (ignoreFilter) return all;
+    if (state.classFilter === '_free') return all.filter(function (g) { return g.key === '_free' || g.key === '_out'; });
+    if (state.classFilter) return all.filter(function (g) { return g.key === state.classFilter; });
+    return all;
+  }
+
+  function classAgeText(c) {
+    var n = 0, parts = [];
+    for (var a = 0; a <= 5; a++) n += S.num(c['n' + a], 0);
+    var ctx = ctxOf(c.facilityId);
+    var need = 0;
+    for (var b = 0; b <= 5; b++) if (ctx.ratio[b]) need += S.num(c['n' + b], 0) / ctx.ratio[b];
+    parts.push((c.ages || '') + ' ' + n + '名');
+    parts.push('必要' + Math.max(1, Math.ceil(need - 1e-9)) + '名');
+    return parts.join('・');
+  }
+
+  function qualBadge(s) {
+    if (!S.bool(s.counted, false)) return '<span class="qual out" title="保育の配置には数えません">外</span>';
+    return S.bool(s.qualified, false) ? '<span class="qual" title="有資格（保育士・保育教諭など）">資</span>' : '<span class="qual no" title="資格なし（補助者・子育て支援員など）">補</span>';
+  }
+
+  function issueCountText(res, rowKey) {
+    var list = res.issues.filter(function (x) { return !rowKey || x.rowKey === rowKey; });
+    var sh = list.filter(function (x) { return x.status === 'short'; }).length;
+    var wn = list.filter(function (x) { return x.status === 'warn'; }).length;
+    return { short: sh, warn: wn, list: list };
+  }
+
+  // ---------- 月・週の一覧 ----------
+  function rosterHTML(r, mode) {
+    var fid = state.facilityId;
+    var dates = S.dateRange(r.from, r.to);
+    var fac = facility();
+    var week = mode === 'week';
+    var groups = staffGroups(fid);
+    var info = dates.map(function (d) {
+      var closed = S.closedReason(fac, d);
+      var dw = S.dow(d);
+      return { d: d, closed: closed, cls: (dw === 6 && !closed ? 'sat' : '') + (closed ? ' closed' + (dw === 0 || S.holidayName(d) ? ' sun' : '') : '') + (d === state.today ? ' today' : ''), res: closed ? null : evalDay(d) };
+    });
+
+    var h = '<div class="grid-wrap" id="grid"><table class="roster ' + mode + '"><colgroup><col class="name">';
+    info.forEach(function (x) { h += '<col class="dcol' + (x.closed && !week ? ' closed' : '') + '">'; });
+    h += '<col class="tot"><col class="tot h"></colgroup><thead><tr class="r-date"><th class="name"><span class="small muted">職員 ＼ 日付</span></th>';
+    info.forEach(function (x) {
+      var label = week ? '<span class="d">' + (+x.d.slice(5, 7)) + '/' + (+x.d.slice(8, 10)) + '</span><span class="w">' + S.DOW[S.dow(x.d)] + '</span>'
+        : '<span class="d">' + (+x.d.slice(8, 10)) + '</span><span class="w">' + S.DOW[S.dow(x.d)] + '</span>';
+      var hol = S.holidayName(x.d);
+      h += '<th class="dcol ' + x.cls + '" title="' + esc(hol || x.closed || '') + '"><button class="dhead" data-act="goday" data-date="' + x.d + '" aria-label="' + esc(S.mdLabel(x.d)) + 'の日表示">' + label + '</button></th>';
+    });
+    h += '<th class="tot">出勤<br>日数</th><th class="tot h">実働<br>時間</th></tr>';
+
+    // 園全体の判定
+    h += '<tr class="r-all"><th class="name"><span class="grp-name">園全体の配置</span></th>';
+    info.forEach(function (x) {
+      if (x.closed) { h += '<th class="dcol ' + x.cls + '">' + (week ? '<span class="small muted" style="padding:0 8px">' + esc(x.closed) + '</span>' : '') + '</th>'; return; }
+      var ic = issueCountText(x.res);
+      var title = ic.list.slice(0, 6).map(function (i) { return i.message; }).join('\n') || '終日充足';
+      var inner;
+      if (week) {
+        inner = ck(x.res.worst, x.res.worst === 'short' ? '不足' + ic.short : x.res.worst === 'warn' ? '要確認' + ic.warn : '充足') +
+          (ic.short && ic.warn ? ck('warn', String(ic.warn)) : '');
+      } else {
+        inner = ck(x.res.worst, x.res.worst === 'short' ? String(ic.short) : x.res.worst === 'warn' ? String(ic.warn) : '');
+      }
+      h += '<th class="dcol ' + x.cls + '"><button class="allck" data-act="goday" data-date="' + x.d + '" title="' + esc(title) + '">' + inner + '</button></th>';
+    });
+    h += '<th class="tot"></th><th class="tot h"></th></tr></thead><tbody>';
+
+    groups.forEach(function (g) {
+      // クラスの見出し行（その日のクラス判定）
+      h += '<tr class="grp"><th class="name"><div class="grp-name">' + (g.cls ? '<span class="dot" style="background:' + esc(g.cls.color) + '"></span>' : '') + '<span>' + esc(g.label) + '</span></div>' +
+        (g.cls ? '<div class="grp-name"><small>' + esc(classAgeText(g.cls)) + '</small></div>' : '') + '</th>';
+      info.forEach(function (x) {
+        if (x.closed || !g.cls) { h += '<td class="' + x.cls + '"></td>'; return; }
+        var row = x.res.rows.filter(function (rr) { return rr.key === g.key; })[0];
+        if (!row) { h += '<td class="' + x.cls + '"></td>'; return; }
+        var iss = x.res.issues.filter(function (i) { return i.rowKey === g.key; });
+        var title = iss.map(function (i) { return i.message; }).join('\n') || (row.worst === 'na' ? '合同保育（園全体で判定）' : 'クラス別保育の時間は充足');
+        var inner = ck(row.worst, '', title);
+        if (week && iss.length) {
+          inner += iss.slice(0, 2).map(function (i) {
+            return '<span class="txt' + (i.status === 'warn' ? ' w' : '') + '">' + esc(i.fromText) + '〜' + esc(i.toText) + (i.status === 'short' && i.why === 'count' ? ' −' + i.shortBy : ' 要確認') + '</span>';
+          }).join('') + (iss.length > 2 ? '<span class="txt">他' + (iss.length - 2) + '件</span>' : '');
+        } else if (week && row.worst === 'na') {
+          inner = '<span class="small muted">合同保育</span>';
+        }
+        h += '<td class="' + x.cls + '"><button class="gck" data-act="goday" data-date="' + x.d + '" title="' + esc(title) + '">' + inner + '</button></td>';
+      });
+      h += '<td class="tot"></td><td class="tot h"></td></tr>';
+
+      g.staff.forEach(function (s) {
+        var days = 0, wmin = 0;
+        h += '<tr class="srow"><th class="name"><div class="sname"><span class="n">' + esc(s.name) + '</span><span class="j">' + qualBadge(s) + '<span>' + esc(s.job || '') + '</span></span></div></th>';
+        info.forEach(function (x) {
+          var sh = getShift(x.d, s.id);
+          if (sh && (sh.kind === K.WORK || sh.kind === K.TRAIN) && S.hasTimes(sh)) { days++; wmin += S.calcHours(sh).workMin; }
+          if (x.closed && !sh) { h += '<td class="' + x.cls + '">' + (week ? '' : '') + '</td>'; return; }
+          h += '<td class="' + x.cls + '">' + cellHTML(sh, s, x.d, week) + '</td>';
+        });
+        h += '<td class="tot">' + days + '</td><td class="tot h">' + hoursText(wmin) + '</td></tr>';
+      });
+    });
+
+    // 出勤人数（保育に従事する職員）
+    h += '<tr class="foot"><th class="name" style="text-align:left">出勤（保育従事）</th>';
+    info.forEach(function (x) {
+      if (x.closed) { h += '<td class="' + x.cls + '"></td>'; return; }
+      var n = 0, all = 0;
+      shiftsOn(x.d).forEach(function (sh) {
+        var st = staffById(sh.staffId);
+        if (sh.kind === K.WORK && S.hasTimes(sh)) { all++; if (st && S.bool(st.counted, false)) n++; }
+      });
+      h += '<td class="' + x.cls + '" title="出勤 ' + all + '名（うち保育従事 ' + n + '名）">' + n + (week ? '名 / 全' + all + '名' : '') + '</td>';
+    });
+    h += '<td class="tot"></td><td class="tot h"></td></tr>';
+    h += '</tbody></table></div>';
+    return h;
+  }
+
+  function cellHTML(sh, staff, date, week) {
+    var data = ' data-act="cell" data-date="' + date + '" data-staff="' + esc(staff.id) + '"';
+    if (!sh) return '<button class="cell empty"' + data + ' aria-label="' + esc(staff.name + ' ' + S.mdLabel(date) + ' 未入力') + '"><span class="plus">＋</span></button>';
+    var ps = patStyle(sh);
+    var stc = 'st-' + (STATUS_CLASS[sh.status] || 'draft');
+    var badge = sh.status === ST.FIXED ? (week ? '✓確定' : '✓') : sh.status === ST.PENDING ? (week ? '承認待ち' : '待') : (week ? '変更中' : '変');
+    var deleting = !sh.type && !S.hasTimes(sh);
+    var labor = S.laborWarnings(sh).length ? ' warnlabor' : '';
+    var style = 'background:' + (deleting ? '#fff' : ps.bg) + ';border-left-color:' + (deleting ? 'var(--line-strong)' : ps.bar);
+    var label = esc(staff.name + ' ' + S.mdLabel(date) + ' ' + S.shiftText(sh) + ' ' + (sh.status || ''));
+    var inner = '';
+    if (deleting) {
+      inner = '<span class="lv">削除予定</span>';
+    } else if (!S.hasTimes(sh)) {
+      inner = '<span class="lv">' + esc(sh.type) + '</span>';
+    } else if (week) {
+      inner = '<span class="tg">' + esc(sh.type) + '</span><span class="tm">' + esc(sh.start) + '〜' + esc(sh.end) + '</span>' +
+        '<span class="sub">' + (sh.breakStart && Number(sh.breakMin) ? '休憩 ' + esc(sh.breakStart) + '〜' + esc(hm(S.toMin(sh.breakStart) + Number(sh.breakMin))) : (Number(sh.breakMin) ? '休憩' + sh.breakMin + '分' : '休憩なし')) + '</span>' +
+        placementHTML(sh, staff, true);
+    } else {
+      inner = '<span class="tg">' + esc(ps.short) + '</span><span class="tm">' + esc(sh.start) + '〜</span><span class="tm">' + esc(sh.end) + '</span>' + placementHTML(sh, staff, false);
+    }
+    return '<button class="cell ' + stc + (deleting ? ' deleting' : '') + labor + '" style="' + style + '"' + data + ' aria-label="' + label + '" title="' + label + (sh.note ? '\n備考: ' + esc(sh.note) : '') + '">' + inner + '<span class="badge">' + badge + '</span></button>';
+  }
+  function placementHTML(sh, staff, week) {
+    var segs = S.parseSegments(sh.segments);
+    var moved = sh.classId && sh.classId !== (staff.classId || '');
+    if (!segs.length && !moved) return '';
+    if (segs.length) {
+      var names = segs.map(function (g) { var c = classById(g.classId); return c ? c.name.replace('組', '') : g.classId; });
+      var c0 = classById(segs[0].classId);
+      if (week) return '<span class="mv" style="background:' + esc(c0 ? darker(c0.color) : '#888') + '" title="' + esc(segs.map(function (g, i) { return names[i] + ' ' + g.from + '〜' + g.to; }).join(' / ')) + '">応援 ' + esc(names.slice(0, 2).join('・')) + (names.length > 2 ? '他' : '') + '</span>';
+      return '<span class="mv" style="background:' + esc(c0 ? darker(c0.color) : '#888') + '">応</span>';
+    }
+    var c = classById(sh.classId);
+    if (!c) return '';
+    return '<span class="mv" style="background:' + esc(darker(c.color)) + '">' + (week ? '→' + esc(c.name) : esc(c.name.slice(0, 1))) + '</span>';
+  }
+  function darker(hex) {
+    var m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || '');
+    if (!m) return '#777';
+    var f = function (x) { return Math.max(0, Math.round(parseInt(x, 16) * 0.62)).toString(16).padStart(2, '0'); };
+    return '#' + f(m[1]) + f(m[2]) + f(m[3]);
+  }
+
+  // ---------- 日表示 ----------
+  function dayHTML(date) {
+    var fac = facility();
+    var closed = S.closedReason(fac, date);
+    if (closed) {
+      return '<div class="ok-banner" style="background:var(--na-bg);color:var(--ink-2)">' + esc(S.mdLabel(date)) + ' は休園日（' + esc(closed) + '）です。</div>' + dayStaffListOnly(date);
+    }
+    var res = evalDay(date);
+    var ctx = ctxOf(state.facilityId);
+    var list = shiftsOn(date);
+    var working = list.filter(function (s) { return (s.kind === K.WORK || s.kind === K.TRAIN) && S.hasTimes(s); });
+    var counted = working.filter(function (s) { var st = staffById(s.staffId); return st && S.bool(st.counted, false) && s.kind === K.WORK; });
+    var wmin = 0;
+    working.forEach(function (s) { wmin += S.calcHours(s).workMin; });
+    var ic = issueCountText(res);
+    var total = res.counts.ok + res.counts.warn + res.counts.short;
+    var h = '<div class="day-summary">' +
+      kpi('出勤', working.length + '名', '保育従事 ' + counted.length + '名') +
+      kpi('実働時間の合計', hoursText(wmin) + 'h', '') +
+      kpi('不足', ic.short + '件', '', ic.short ? 'short' : 'ok') +
+      kpi('要確認', ic.warn + '件', '', ic.warn ? 'warn' : 'ok') +
+      kpi('充足率', total ? Math.round(res.counts.ok / total * 1000) / 10 + '%' : '—', '15分ごとの判定のうち', 'ok') +
+      '</div>';
+    if (ic.list.length) {
+      var LIMIT = 6;
+      var showAll = state.issuesOpen || ic.list.length <= LIMIT + 1;
+      h += '<div class="issues-head" style="margin:0 16px 6px">' + ck('short') + '不足・要確認の箇所 ' + ic.list.length + '件<span class="small muted">（クラスの判定は ' + esc(fac.classStart) + '〜' + esc(fac.classEnd) + '、それ以外は園全体で判定）</span></div>' +
+        '<div class="issues">' +
+        ic.list.slice(0, showAll ? ic.list.length : LIMIT).map(function (i) {
+          return '<div class="issue ' + i.status + '">' + ck(i.status) + '<div><div class="t">' + esc(i.label) + ' <span class="num">' + esc(i.fromText) + '〜' + esc(i.toText) + '</span> ' +
+            (i.status === 'short' && i.why === 'count' ? i.shortBy + '名不足' : i.status === 'short' ? '有資格者が不足' : '要確認') + '</div>' +
+            '<div class="d">必要 ' + i.req + '名 ／ 配置 ' + i.n + '名（うち有資格 ' + i.q + '名）' + (i.why && i.why !== 'count' ? '・' + esc(S.WHY_TEXT[i.why]) : '') + '</div></div></div>';
+        }).join('') + '</div>' +
+        (showAll ? '' : '<div style="margin:-4px 16px 10px"><button class="btn small" data-act="issues-all">残り ' + (ic.list.length - LIMIT) + '件も表示</button></div>');
+    } else {
+      h += '<div class="ok-banner">' + ICON.ok.replace('<svg', '<svg width="14" height="14"') + ' この日は、すべての時間帯・クラスで配置基準を満たしています。</div>';
+    }
+
+    var open = res.open, close = res.close, span = close - open;
+    var cols = [];
+    for (var t = open; t < close; t += 30) cols.push(t);
+    var N = cols.length;
+    h += '<div class="grid-wrap" id="grid"><table class="tl"><colgroup><col class="name">' + cols.map(function () { return '<col class="tcol">'; }).join('') + '</colgroup>';
+    h += '<thead><tr><th class="name"><span class="small muted">時刻</span></th>' + cols.map(function (c) {
+      return '<th class="' + (c % 60 ? 'half' : '') + '">' + (c % 60 ? '' : (c / 60) + ':00') + '</th>';
+    }).join('') + '</tr></thead><tbody>';
+
+    // 配置チェック
+    h += '<tr class="sec"><th colspan="' + (N + 1) + '">配置チェック <span class="small muted" style="font-weight:400">（配置 ／ 必要。30分の中で一番きびしい15分を表示）</span></th></tr>';
+    var allRow = res.rows[0];
+    h += '<tr><th class="name"><span class="small">在園見込み（人）</span></th>' + cols.map(function (c, i) {
+      var a = allRow.cells[i * 2], b = allRow.cells[i * 2 + 1] || a;
+      return '<td class="kids">' + Math.max(a.kids, b.kids) + '</td>';
+    }).join('') + '</tr>';
+    res.rows.forEach(function (row) {
+      var c0 = row.key === 'all' ? null : classById(row.key);
+      h += '<tr><th class="name"><div class="grp-name">' + (c0 ? '<span class="dot" style="background:' + esc(c0.color) + '"></span>' : '') + esc(row.label) + '</div></th>';
+      cols.forEach(function (c, i) {
+        var a = row.cells[i * 2], b = row.cells[i * 2 + 1] || a;
+        var rank = { na: 0, ok: 1, warn: 2, short: 3 };
+        var w = rank[b.st] > rank[a.st] ? b : a;
+        if (w.st === 'na') {
+          h += '<td class="cv na" title="' + (row.key === 'all' ? '子どもがいない時間' : '合同保育の時間帯（園全体で判定）') + '">' + (row.key === 'all' ? '' : (w.n ? w.n : '') + '<small>' + (row.key === 'all' ? '' : '合同') + '</small>') + '</td>';
+          return;
+        }
+        var title = hm(c) + '〜' + hm(c + 30) + ' ' + row.label + '：配置' + w.n + '名（有資格' + w.q + '）／必要' + w.req + '名・子ども' + w.kids + '人 → ' + CK_LABEL[w.st] + (w.why && w.why !== 'count' ? '（' + S.WHY_TEXT[w.why] + '）' : '');
+        h += '<td class="cv ' + w.st + '" title="' + esc(title) + '">' + w.n + '/' + w.req + (w.st === 'short' ? '<small>' + (w.why === 'count' ? '−' + (w.req - w.n) : '資格') + '</small>' : w.st === 'warn' ? '<small>要確認</small>' : '') + '</td>';
+      });
+      h += '</tr>';
+    });
+
+    // 職員のタイムライン
+    var groups = staffGroups(state.facilityId, true);
+    var offList = [];
+    groups.forEach(function (g) {
+      var rows = g.staff.map(function (s) { return { s: s, sh: getShift(date, s.id) }; });
+      rows.forEach(function (r) { if (r.sh && !S.hasTimes(r.sh)) offList.push(r); });
+      rows = rows.filter(function (r) { return r.sh && S.hasTimes(r.sh); })
+        .sort(function (a, b) { return S.toMin(a.sh.start) - S.toMin(b.sh.start); });
+      if (!rows.length) return;
+      h += '<tr class="sec"><th colspan="' + (N + 1) + '"><span class="grp-name">' + (g.cls ? '<span class="dot" style="background:' + esc(g.cls.color) + '"></span>' : '') + esc(g.label) + ' <small>' + rows.length + '名</small></span></th></tr>';
+      rows.forEach(function (r) {
+        h += '<tr><th class="name"><div class="sname" style="min-height:44px"><span class="n">' + esc(r.s.name) + '</span><span class="j">' + qualBadge(r.s) + '<span>' + esc(r.sh.type || '') + '</span></span></div></th>' +
+          '<td class="lane" colspan="' + N + '"><div class="grid"></div>' + barHTML(r.sh, r.s, open, span) + '</td></tr>';
+      });
+    });
+    if (offList.length) {
+      h += '<tr class="sec"><th colspan="' + (N + 1) + '">お休み・削除予定 <small class="muted" style="font-weight:400">' + offList.length + '名</small></th></tr>';
+      h += '<tr><td colspan="' + (N + 1) + '" style="padding:8px 10px;position:sticky;left:0">' + offList.map(function (r) {
+        return '<button class="chip" data-act="cell" data-date="' + date + '" data-staff="' + esc(r.s.id) + '" style="margin:2px">' + esc(r.s.name) + '<span class="muted">' + esc(r.sh.type || '削除予定') + '</span></button>';
+      }).join('') + '</td></tr>';
+    }
+    // 未入力の職員
+    var none = staffOf(state.facilityId).filter(function (s) { return !getShift(date, s.id); });
+    if (none.length) {
+      h += '<tr class="sec"><th colspan="' + (N + 1) + '">未入力 <small class="muted" style="font-weight:400">タップして入力</small></th></tr>';
+      h += '<tr><td colspan="' + (N + 1) + '" style="padding:8px 10px">' + none.map(function (s) {
+        return '<button class="chip" data-act="cell" data-date="' + date + '" data-staff="' + esc(s.id) + '" style="margin:2px">＋ ' + esc(s.name) + '</button>';
+      }).join('') + '</td></tr>';
+    }
+    h += '</tbody></table></div>';
+    return h;
+  }
+  function dayStaffListOnly(date) {
+    var list = shiftsOn(date);
+    if (!list.length) return '';
+    return '<div class="panel"><div class="panel-head"><b>この日に入力されている勤務</b></div><div style="padding:10px">' + list.map(function (sh) {
+      return '<button class="chip" data-act="cell" data-date="' + date + '" data-staff="' + esc(sh.staffId) + '" style="margin:2px">' + esc(sh.staffName) + ' ' + esc(S.shiftText(sh)) + '</button>';
+    }).join('') + '</div></div>';
+  }
+  function kpi(k, v, sub, cls) {
+    return '<div class="kpi ' + (cls || '') + '"><div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div>' + (sub ? '<div class="small muted">' + esc(sub) + '</div>' : '') + '</div>';
+  }
+  function barHTML(sh, staff, open, span) {
+    var st = S.toMin(sh.start), en = S.toMin(sh.end);
+    var left = Math.max(0, (st - open) / span * 100), right = Math.min(100, (en - open) / span * 100);
+    var ps = patStyle(sh);
+    var stc = 'st-' + (STATUS_CLASS[sh.status] || 'draft');
+    var out = !S.bool(staff.counted, false) || sh.kind === K.TRAIN;
+    var inner = '';
+    var len = en - st;
+    var bs = S.toMin(sh.breakStart), bm = Number(sh.breakMin) || 0;
+    if (bs !== null && bm) inner += '<span class="brk" style="left:' + ((bs - st) / len * 100) + '%;width:' + (bm / len * 100) + '%" title="休憩 ' + esc(sh.breakStart) + '〜' + esc(hm(bs + bm)) + '"></span>';
+    var segs = S.parseSegments(sh.segments);
+    segs.forEach(function (g) {
+      var c = classById(g.classId);
+      var a = S.toMin(g.from), b = S.toMin(g.to);
+      inner += '<span class="seg" style="left:' + ((a - st) / len * 100) + '%;width:' + ((b - a) / len * 100) + '%;background:' + esc(c ? darker(c.color) : '#888') + '" title="' + esc((c ? c.name : g.classId) + ' ' + g.from + '〜' + g.to) + '"></span>';
+    });
+    var segText = segs.map(function (g) { var c = classById(g.classId); return (c ? c.name : g.classId) + ' ' + g.from + '〜' + g.to; }).join(' ／ ');
+    var moved = !segs.length && sh.classId && sh.classId !== (staff.classId || '') ? (classById(sh.classId) || {}).name : '';
+    var label = esc(sh.start) + '〜' + esc(sh.end);
+    var sub = (bs !== null && bm ? '休憩' + esc(sh.breakStart) + '〜' + esc(hm(bs + bm)) : bm ? '休憩' + bm + '分' : '') +
+      (segText ? '　応援: ' + esc(segText) : '') + (moved ? '　終日 ' + esc(moved) : '') + (out ? '　（配置外）' : '') +
+      (sh.status !== ST.FIXED ? '　［' + esc(sh.status) + '］' : '');
+    return '<button class="tbar ' + stc + (out ? ' out' : '') + '" data-act="cell" data-date="' + sh.date + '" data-staff="' + esc(staff.id) + '" style="left:' + left + '%;width:' + (right - left) + '%;background:' + esc(ps.bg) + ';border-left-color:' + esc(ps.bar) + '" title="' + esc(staff.name + ' ' + S.shiftText(sh) + ' ' + sub.replace(/　/g, ' ')) + '">' +
+      inner + '<span class="bl">' + label + '</span><span class="bt">' + sub + '</span></button>';
+  }
+
+  // ------------------------------------------------------------------
+  // かんたん入力（パターンを選んで、マスをタップしていく）
+  // ------------------------------------------------------------------
+  var queue = [], flushTimer = null;
+  function renderQuickbar() {
+    var q = $('#quick');
+    if (!q) return;
+    if (!state.quick || state.page !== 'facility') { q.innerHTML = ''; return; }
+    var pats = patternsOf(state.facilityId);
+    q.innerHTML = '<div class="quickbar" role="toolbar" aria-label="かんたん入力"><span class="title">かんたん入力</span><div class="chips">' +
+      pats.map(function (p) {
+        return '<button class="pat" data-act="qpat" data-name="' + esc(p.name) + '" aria-pressed="' + (state.quick === p.name) + '" style="border-left-color:' + esc(p.bar) + ';background:' + esc(p.bg) + '"><b>' + esc(p.name) + '</b><span>' + (p.start ? esc(p.start) + '〜' + esc(p.end) : '&nbsp;') + '</span></button>';
+      }).join('') +
+      '<button class="pat" data-act="qpat" data-name="__clear" aria-pressed="' + (state.quick === '__clear') + '" style="border-left-color:#999"><b>消す</b><span>&nbsp;</span></button>' +
+      '</div><button class="btn primary" data-act="quick">終了</button></div>';
+  }
+  function usualTimes(staffId, type) {
+    var best = null;
+    Object.keys(state.shifts).forEach(function (id) {
+      var s = state.shifts[id];
+      if (s.staffId === staffId && s.type === type && S.hasTimes(s) && (!best || s.date > best.date)) best = s;
+    });
+    return best;
+  }
+  function suggestBreak(start, end, bm) {
+    if (!bm) return '';
+    var st = S.toMin(start), en = S.toMin(end);
+    if (st === null || en === null) return '';
+    var b = Math.max(st + 180, 12 * 60 + 30);
+    if (b + bm > en - 60) b = st + Math.floor((en - st - bm) / 30) * 15;
+    return hm(Math.round(b / 15) * 15);
+  }
+  function itemFromPattern(p, staff, date, cur) {
+    if (!p) return { staffId: staff.id, date: date, clear: true };
+    var it = { staffId: staff.id, date: date, type: p.name, kind: p.kind, start: p.start || '', end: p.end || '', breakMin: Number(p.breakMin) || 0, classId: staff.classId || '', segments: '', note: '' };
+    var u = usualTimes(staff.id, p.name);
+    if (u && (p.kind === K.WORK || p.kind === K.TRAIN)) { it.start = u.start; it.end = u.end; it.breakMin = Number(u.breakMin) || 0; }
+    if (p.kind === K.WORK || p.kind === K.TRAIN) it.breakStart = suggestBreak(it.start, it.end, it.breakMin);
+    else { it.start = ''; it.end = ''; it.breakMin = 0; it.breakStart = ''; }
+    return it;
+  }
+  function quickApply(date, staffId) {
+    var staff = staffById(staffId);
+    var cur = getShift(date, staffId);
+    if (state.quick === '__clear' && !cur) return;
+    var p = state.quick === '__clear' ? null : patternOf(state.quick);
+    var it = itemFromPattern(p, staff, date, cur);
+    it.base = cur ? (cur._local ? cur._base : cur.editedAt || '') : '';
+    // 画面にはすぐ反映（保存はまとめて行う）
+    var local = cur ? clone(cur) : { id: date + '_' + staffId, facilityId: state.facilityId, date: date, staffId: staffId, staffName: staff.name };
+    if (it.clear) { local.type = ''; local.kind = ''; local.start = ''; local.end = ''; local.breakMin = 0; local.breakStart = ''; }
+    else Object.keys(it).forEach(function (k) { if (k !== 'base') local[k] = it[k]; });
+    local.status = ST.DRAFT; local._local = true; local._base = it.base;
+    state.shifts[local.id] = local;
+    dirty([date]);
+    queue = queue.filter(function (q) { return !(q.date === date && q.staffId === staffId); });
+    queue.push(it);
+    clearTimeout(flushTimer);
+    flushTimer = setTimeout(flushQueue, 700);
+    renderFacility();
+  }
+  function flushQueue() {
+    if (!queue.length) return;
+    var items = queue; queue = [];
+    withEditor(function () {
+      api('api_saveShifts', { token: state.token, editor: state.editor, facilityId: state.facilityId, items: items }).then(function (res) {
+        items.forEach(function (it) {
+          var id = it.date + '_' + it.staffId;
+          if (state.shifts[id] && state.shifts[id]._local && !queue.some(function (q) { return q.date === it.date && q.staffId === it.staffId; })) delete state.shifts[id];
+        });
+        applySaved(res);
+        if (res.conflicts && res.conflicts.length) {
+          toast('他の人が先に変更していた ' + res.conflicts.length + ' 件は保存せず、最新の内容を表示しました。', 'err');
+          res.conflicts.forEach(function (c) { if (c.current) state.shifts[c.id] = c.current; else delete state.shifts[c.id]; });
+          dirty();
+        } else {
+          toast(items.length + '件を保存しました（変更中）', 'ok');
+        }
+        render();
+      }).catch(function (e) {
+        items.forEach(function (it) { var id = it.date + '_' + it.staffId; if (state.shifts[id] && state.shifts[id]._local) delete state.shifts[id]; });
+        reloadRange(true);
+        handleErr(e);
+      });
+    }, function () {
+      items.forEach(function (it) { var id = it.date + '_' + it.staffId; if (state.shifts[id] && state.shifts[id]._local) delete state.shifts[id]; });
+      reloadRange(true);
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // ダイアログ（共通）
+  // ------------------------------------------------------------------
+  var modalStack = [];
+  function openModal(opt) {
+    var wrap = document.createElement('div');
+    wrap.className = 'modal-back';
+    wrap.innerHTML = '<div class="modal' + (opt.wide ? ' wide' : '') + '" role="dialog" aria-modal="true" aria-label="' + esc(opt.title) + '">' +
+      '<div class="modal-head"><h2>' + esc(opt.title) + (opt.sub ? '<span class="sub">' + opt.sub + '</span>' : '') + '</h2><button class="btn icon ghost" data-close aria-label="閉じる">✕</button></div>' +
+      '<div class="modal-body"></div>' + (opt.foot === false ? '' : '<div class="modal-foot"></div>') + '</div>';
+    $('#modals').appendChild(wrap);
+    var api_ = {
+      el: wrap, body: $('.modal-body', wrap), foot: $('.modal-foot', wrap), head: $('.modal-head h2', wrap),
+      close: function () { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); modalStack = modalStack.filter(function (m) { return m !== api_; }); if (opt.onClose) opt.onClose(); }
+    };
+    wrap.addEventListener('click', function (e) {
+      if (e.target === wrap || e.target.closest('[data-close]')) api_.close();
+    });
+    modalStack.push(api_);
+    return api_;
+  }
+  function closeAllModals() { modalStack.slice().forEach(function (m) { m.close(); }); }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && modalStack.length) modalStack[modalStack.length - 1].close();
+  });
+  function toast(msg, type) {
+    var box = $('#toasts');
+    if (!box) return;
+    var t = document.createElement('div');
+    t.className = 'toast ' + (type || '');
+    t.textContent = msg;
+    box.appendChild(t);
+    setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, type === 'err' ? 6000 : 3200);
+  }
+  function showStamp(name) {
+    var d = document.createElement('div');
+    d.className = 'stamp-anim';
+    var now = S.nowJST();
+    d.innerHTML = '<div class="s"><span class="a">承認</span><span class="b">' + esc(surname(name).slice(0, 4)) + '</span><span class="c">' + (+now.slice(5, 7)) + '.' + (+now.slice(8, 10)) + '</span></div>';
+    document.body.appendChild(d);
+    setTimeout(function () { if (d.parentNode) d.parentNode.removeChild(d); }, 1300);
+  }
+
+  // ---------- 入力者 ----------
+  function withEditor(then, cancel) {
+    if (state.user || state.editor) { then(); return; }
+    openWho(then, cancel);
+  }
+  function openWho(then, cancel) {
+    var done = false;
+    var m = openModal({ title: '入力する人を選んでください', sub: '変更の記録（入力者）として残ります。次回からは自動で選ばれます。',
+      onClose: function () { if (!done && cancel) cancel(); } });
+    var staff = staffOf(state.facilityId);
+    m.body.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:6px">' + staff.map(function (s) {
+      return '<button class="chip" data-name="' + esc(s.name) + '">' + esc(s.name) + '</button>';
+    }).join('') + '</div><div class="field" style="margin-top:14px"><label for="who-other">一覧にない場合は名前を入力</label><input id="who-other" class="input" style="width:100%" maxlength="30" placeholder="例：山田 花子"></div>';
+    m.foot.innerHTML = '<button class="btn" data-close>キャンセル</button><button class="btn primary" id="who-ok">この名前で入力する</button>';
+    var pick = function (name) {
+      name = String(name || '').trim();
+      if (!name) { toast('名前を選ぶか入力してください', 'err'); return; }
+      state.editor = name; LS.set('editor', name); done = true; m.close(); renderTopbar();
+      if (then) then();
+    };
+    m.body.addEventListener('click', function (e) { var b = e.target.closest('[data-name]'); if (b) pick(b.getAttribute('data-name')); });
+    $('#who-ok', m.foot).addEventListener('click', function () { pick($('#who-other', m.body).value); });
+  }
+
+  // ---------- 勤務の編集 ----------
+  function timeOptions(sel, from, to, allowEmpty) {
+    var out = allowEmpty ? '<option value="">指定なし</option>' : '';
+    var selMin = S.toMin(sel);
+    var found = false;
+    for (var t = from; t <= to; t += 15) {
+      if (t === selMin) found = true;
+      out += '<option value="' + hm(t) + '"' + (t === selMin ? ' selected' : '') + '>' + hm(t) + '</option>';
+    }
+    if (selMin !== null && !found) out = '<option value="' + hm(selMin) + '" selected>' + hm(selMin) + '</option>' + out;
+    return out;
+  }
+  function openEditor(date, staffId) {
+    var staff = staffById(staffId);
+    if (!staff) return;
+    var fac = facility();
+    var cur = getShift(date, staffId);
+    var pats = patternsOf(state.facilityId);
+    var cls = classesOf(state.facilityId);
+    var d = cur ? clone(cur) : { type: '', kind: '', start: '', end: '', breakStart: '', breakMin: 45, classId: staff.classId || '', segments: '', note: '' };
+    if (!d.type && cur && !S.hasTimes(cur)) d.kind = '';
+    var segs = S.parseSegments(d.segments);
+    var closed = S.closedReason(fac, date);
+    var mainCls = classById(staff.classId);
+    var m = openModal({
+      title: S.mdLabel(date) + '　' + staff.name,
+      sub: esc((mainCls ? mainCls.name + '・' : '') + (staff.job || '') + (S.bool(staff.qualified, false) ? '・有資格' : '・資格なし')) + (cur ? '　' + statusPill(cur.status) : '　<span class="muted">未入力</span>')
+    });
+    function isWork() { return d.kind === K.WORK || d.kind === K.TRAIN || !d.kind; }
+    function draw() {
+      var h = '';
+      if (closed) h += '<div class="prev" style="background:var(--na-bg);color:var(--ink-2)">この日は休園日（' + esc(closed) + '）です。行事などで出勤する場合のみ入力してください。</div>';
+      if (cur && cur.prevFixed) h += '<div class="prev">確定していた内容：<b>' + esc(cur.prevFixed) + '</b><br><span class="small">この変更は承認印が押されるまで「' + esc(cur.status) + '」です。</span></div>';
+      if (cur && /^【差戻し】/.test(cur.note || '')) h += '<div class="prev" style="background:var(--short-bg);color:var(--short)">' + esc(cur.note) + '</div>';
+      h += '<div class="field"><span class="lbl">勤務区分（押すと時刻が入ります。時刻はあとから変えられます）</span><div class="pat-grid">' +
+        pats.map(function (p) {
+          return '<button class="pat" data-pat="' + esc(p.name) + '" aria-pressed="' + (d.type === p.name) + '" style="border-left-color:' + esc(p.bar) + ';background:' + esc(p.bg) + '"><b>' + esc(p.name) + '</b><span>' + (p.start ? esc(p.start) + '〜' + esc(p.end) : esc(p.kind)) + '</span></button>';
+        }).join('') + '</div></div>';
+      if (isWork()) {
+        h += '<div class="field"><div class="time-row">' +
+          timePick('出勤', 'start', d.start, 5 * 60, 22 * 60) + timePick('退勤', 'end', d.end, 5 * 60, 23 * 60) +
+          '<div class="time-pick"><span class="lbl">休憩</span><div class="ctl"><select class="select" data-k="breakMin">' +
+          [0, 30, 45, 60, 75, 90].map(function (v) { return '<option value="' + v + '"' + (Number(d.breakMin) === v ? ' selected' : '') + '>' + (v ? v + '分' : 'なし') + '</option>'; }).join('') +
+          '</select></div></div>' +
+          (Number(d.breakMin) ? '<div class="time-pick"><span class="lbl">休憩の開始</span><div class="ctl"><select class="select" data-k="breakStart">' + timeOptions(d.breakStart, 9 * 60, 18 * 60, true) + '</select></div></div>' : '') +
+          '</div>' + calcHTML() + '</div>';
+        h += '<div class="field"><span class="lbl">配置（どのクラスで保育するか）</span><select class="select" data-k="classId" style="min-width:220px">' +
+          '<option value="">フリー（クラスに固定しない）</option>' +
+          cls.map(function (c) { return '<option value="' + esc(c.id) + '"' + (d.classId === c.id ? ' selected' : '') + '>' + esc(c.name) + '（' + esc(c.ages || '') + '）' + (c.id === staff.classId ? '・主担当' : '') + '</option>'; }).join('') +
+          '</select>' +
+          '<div style="margin-top:8px"><div class="small muted" style="margin-bottom:4px">時間帯によって別のクラスに入る（応援・休憩の交代など）</div>' +
+          segs.map(function (g, i) {
+            return '<div class="seg-row"><select class="select" data-seg="' + i + '" data-sk="classId">' + cls.map(function (c) { return '<option value="' + esc(c.id) + '"' + (g.classId === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>'; }).join('') + '</select>' +
+              '<select class="select" data-seg="' + i + '" data-sk="from">' + timeOptions(g.from, 5 * 60, 22 * 60) + '</select><span>〜</span>' +
+              '<select class="select" data-seg="' + i + '" data-sk="to">' + timeOptions(g.to, 5 * 60, 23 * 60) + '</select>' +
+              '<button class="btn small" data-segdel="' + i + '" aria-label="この時間帯を削除">✕</button></div>';
+          }).join('') +
+          '<button class="btn small" data-segadd>＋ 時間帯を追加</button></div></div>';
+      }
+      h += '<div class="field"><label for="ed-note">備考</label><input id="ed-note" class="input" style="width:100%" maxlength="100" data-k="note" value="' + esc((d.note || '').replace(/^【差戻し】[^/]*\/?\s*/, '')) + '" placeholder="例：通院のため遅出"></div>';
+      h += '<p class="small muted" style="margin:0">保存すると「変更中」になります。「承認依頼」→ 園長・主任の「承認印」で確定します。</p>';
+      m.body.innerHTML = h;
+      m.foot.innerHTML = (cur ? '<button class="btn danger left" data-del>この日の勤務を消す</button>' : '<span class="left"></span>') +
+        '<button class="btn" data-close>キャンセル</button><button class="btn primary" data-save>保存</button>';
+    }
+    function timePick(label, key, val, from, to) {
+      return '<div class="time-pick"><span class="lbl">' + label + '</span><div class="ctl">' +
+        '<button class="btn icon small" data-step="' + key + '" data-d="-15" aria-label="' + label + 'を15分早く">−</button>' +
+        '<select class="select" data-k="' + key + '">' + (val ? '' : '<option value="">--:--</option>') + timeOptions(val, from, to) + '</select>' +
+        '<button class="btn icon small" data-step="' + key + '" data-d="15" aria-label="' + label + 'を15分遅く">＋</button></div></div>';
+    }
+    function calcHTML() {
+      if (!S.hasTimes(d)) return '<div class="calc muted">出勤・退勤の時刻を選んでください</div>';
+      var hrs = S.calcHours(d);
+      var warn = S.laborWarnings(d);
+      var bs = S.toMin(d.breakStart);
+      return '<div class="calc">実働 <b>' + S.hoursLabel(hrs.workMin) + '</b>（拘束 ' + S.hoursLabel(hrs.spanMin) + '・休憩 ' + (Number(d.breakMin) || 0) + '分' +
+        (bs !== null && Number(d.breakMin) ? ' ' + esc(d.breakStart) + '〜' + hm(bs + Number(d.breakMin)) : '') + '）' +
+        (warn.length ? '<div class="labor">⚠ ' + esc(warn.join(' / ')) + '</div>' : '') + '</div>';
+    }
+    draw();
+    m.body.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-pat]');
+      if (b) {
+        var p = patternOf(b.getAttribute('data-pat'));
+        var it = itemFromPattern(p, staff, date, cur);
+        d.type = p.name; d.kind = p.kind;
+        if (p.kind === K.WORK || p.kind === K.TRAIN) {
+          d.start = it.start; d.end = it.end; d.breakMin = it.breakMin;
+          d.breakStart = it.breakStart;
+          if (!d.classId && staff.classId) d.classId = staff.classId;
+        } else { d.start = ''; d.end = ''; d.breakMin = 0; d.breakStart = ''; segs = []; }
+        draw(); return;
+      }
+      var st = e.target.closest('[data-step]');
+      if (st) {
+        var k = st.getAttribute('data-step'), dd = Number(st.getAttribute('data-d'));
+        var v = S.toMin(d[k]);
+        if (v === null) v = k === 'start' ? 8 * 60 + 30 : 17 * 60 + 15; else v += dd;
+        d[k] = hm(Math.max(0, Math.min(23 * 60 + 45, v)));
+        if (!d.kind) d.kind = K.WORK;
+        draw(); return;
+      }
+      if (e.target.closest('[data-segadd]')) {
+        var c0 = cls.filter(function (c) { return c.id !== d.classId; })[0] || cls[0];
+        var a = S.toMin(d.start) || 9 * 60;
+        segs.push({ classId: c0 ? c0.id : '', from: hm(Math.max(a, 9 * 60)), to: hm(Math.max(a, 9 * 60) + 60) });
+        draw(); return;
+      }
+      var sd = e.target.closest('[data-segdel]');
+      if (sd) { segs.splice(Number(sd.getAttribute('data-segdel')), 1); draw(); return; }
+    });
+    m.body.addEventListener('change', function (e) {
+      var k = e.target.getAttribute('data-k');
+      if (k) {
+        d[k] = e.target.value;
+        if (k === 'breakMin') { d.breakMin = Number(e.target.value); if (d.breakMin && !d.breakStart) d.breakStart = suggestBreak(d.start, d.end, d.breakMin); }
+        if ((k === 'start' || k === 'end') && !d.kind) d.kind = K.WORK;
+        if (k !== 'note') draw();
+        return;
+      }
+      var si = e.target.getAttribute('data-seg');
+      if (si !== null) { segs[Number(si)][e.target.getAttribute('data-sk')] = e.target.value; draw(); }
+    });
+    m.body.addEventListener('input', function (e) { if (e.target.getAttribute('data-k') === 'note') d.note = e.target.value; });
+    m.foot.addEventListener('click', function (e) {
+      if (e.target.closest('[data-save]')) {
+        var note = $('#ed-note', m.body) ? $('#ed-note', m.body).value : d.note;
+        if (!d.type && !S.hasTimes(d)) { toast('勤務区分を選ぶか、時刻を入れてください', 'err'); return; }
+        var work = isWork();
+        if (work && !S.hasTimes(d)) { toast('出勤・退勤の時刻を入れてください', 'err'); return; }
+        if (work && S.toMin(d.end) <= S.toMin(d.start)) { toast('退勤は出勤より後の時刻にしてください', 'err'); return; }
+        var bad = segs.filter(function (g) { return S.toMin(g.to) <= S.toMin(g.from) || S.toMin(g.from) < S.toMin(d.start) || S.toMin(g.to) > S.toMin(d.end); });
+        if (work && bad.length) { toast('時間帯の配置は、勤務時間の中で開始＜終了になるように入れてください', 'err'); return; }
+        var item = { staffId: staffId, date: date, type: d.type || '勤務', kind: d.kind || K.WORK, start: work ? d.start : '', end: work ? d.end : '',
+          breakStart: work && Number(d.breakMin) ? d.breakStart : '', breakMin: work ? Number(d.breakMin) || 0 : 0,
+          classId: d.classId || '', segments: work ? S.formatSegments(segs) : '', note: note, base: cur ? cur.editedAt || '' : '' };
+        save([item], m);
+      }
+      if (e.target.closest('[data-del]')) {
+        if (!confirm(staff.name + ' さんの ' + S.mdLabel(date) + ' の勤務を消しますか？' + (cur && cur.status === ST.FIXED ? '\n（確定済みのため、承認印が押されるまで「削除予定」として残ります）' : ''))) return;
+        save([{ staffId: staffId, date: date, clear: true, base: cur ? cur.editedAt || '' : '' }], m);
+      }
+    });
+  }
+  function save(items, modal) {
+    withEditor(function () {
+      api('api_saveShifts', { token: state.token, editor: state.editor, facilityId: state.facilityId, items: items }).then(function (res) {
+        applySaved(res);
+        if (res.conflicts && res.conflicts.length) {
+          res.conflicts.forEach(function (c) { if (c.current) state.shifts[c.id] = c.current; else delete state.shifts[c.id]; });
+          dirty();
+          toast('他の人が先にこの勤務を変更していました。最新の内容を表示します。もう一度入力してください。', 'err');
+        } else {
+          toast('保存しました（変更中）。まとまったら「承認依頼」を出してください。', 'ok');
+        }
+        if (modal) modal.close();
+        render();
+      }).catch(function (e) { handleErr(e); });
+    });
+  }
+
+  // ---------- 承認依頼 ----------
+  function changeRowHTML(s, withCheck) {
+    var after = !s.type && !S.hasTimes(s) ? '（削除）' : S.shiftText(s);
+    var cl = classById(s.classId);
+    return '<label class="row">' + (withCheck ? '<input type="checkbox" data-id="' + esc(s.id) + '" checked>' : '') +
+      '<div class="main"><div class="a">' + esc(s.staffName) + '　<span class="num">' + esc(after) + '</span>' + (cl ? ' <span class="small muted">' + esc(cl.name) + '</span>' : '') + '</div>' +
+      (s.prevFixed ? '<div class="b">変更前：' + esc(s.prevFixed) + '<span class="arrow">→</span>変更後：' + esc(after) + '</div>' : '<div class="b">新しく入力</div>') +
+      '<div class="c">' + esc(s.editor || '') + '　' + esc((s.editedAt || '').slice(5, 16)) + (s.note ? '　備考：' + esc(s.note) : '') + '</div></div>' + statusPill(s.status) + '</label>';
+  }
+  function groupedList(list, withCheck) {
+    var by = {};
+    list.forEach(function (s) { (by[s.date] || (by[s.date] = [])).push(s); });
+    return '<div class="list">' + Object.keys(by).sort().map(function (d) {
+      return '<div class="date-h">' + esc(S.mdLabel(d)) + '</div>' + by[d].map(function (s) { return changeRowHTML(s, withCheck); }).join('');
+    }).join('') + '</div>';
+  }
+  function openRequest() {
+    var r = viewRange();
+    var list = shiftsIn(r.from, r.to).filter(function (s) { return s.status === ST.DRAFT; });
+    var m = openModal({ title: '承認依頼を出す', sub: esc(facility().name + '・' + rangeTitle(state.view, state.anchor)) + '　「変更中」の勤務 ' + list.length + '件', wide: true });
+    if (!list.length) { m.body.innerHTML = '<div class="empty-note">表示中の期間に「変更中」の勤務はありません。</div>'; m.foot.innerHTML = '<button class="btn" data-close>閉じる</button>'; return; }
+    m.body.innerHTML = '<p class="small muted" style="margin-top:0">チェックした勤務を「承認待ち」にして、園長・主任に確認を依頼します。</p>' + groupedList(list, true) +
+      '<div class="field" style="margin-top:12px"><label for="rq-msg">ひとこと（任意）</label><input id="rq-msg" class="input" style="width:100%" maxlength="100" placeholder="例：12月の行事に合わせて変更しました"></div>';
+    m.foot.innerHTML = '<button class="btn" data-close>キャンセル</button><button class="btn primary" data-ok>承認依頼を出す</button>';
+    $('[data-ok]', m.foot).addEventListener('click', function () {
+      var ids = $$('input[data-id]:checked', m.body).map(function (x) { return x.getAttribute('data-id'); });
+      if (!ids.length) { toast('1件以上選んでください', 'err'); return; }
+      withEditor(function () {
+        api('api_requestApproval', { token: state.token, editor: state.editor, facilityId: state.facilityId, ids: ids, message: $('#rq-msg', m.body).value }).then(function (res) {
+          applySaved(res); m.close(); render();
+          toast('承認依頼を出しました（' + res.updated.length + '件）', 'ok');
+        }).catch(function (e) { handleErr(e); });
+      });
+    });
+  }
+
+  // ---------- 承認印 ----------
+  function openApprove() {
+    if (!canApproveHere()) {
+      openLogin({ reason: '承認印を押せるのは、この園の園長・主任、または本部のアカウントです。', facilityId: state.facilityId, then: openApprove });
+      return;
+    }
+    var r = viewRange();
+    var includeDraft = false;
+    var m = openModal({ title: '承認印を押す', sub: esc(facility().name + '・' + rangeTitle(state.view, state.anchor) + '　承認者：' + state.user.name), wide: true });
+    function draw() {
+      var list = shiftsIn(r.from, r.to).filter(function (s) { return s.status === ST.PENDING || (includeDraft && s.status === ST.DRAFT); });
+      m.body.innerHTML = '<label class="chip" style="margin-bottom:10px"><input type="checkbox" id="ap-draft"' + (includeDraft ? ' checked' : '') + ' style="width:18px;height:18px"> 「変更中」（承認依頼前）の勤務も表示する</label>' +
+        (list.length ? groupedList(list, true) : '<div class="empty-note">承認待ちの勤務はありません。</div>') +
+        '<div class="field" style="margin-top:12px"><label for="ap-reason">差戻しの理由（差戻す場合）</label><input id="ap-reason" class="input" style="width:100%" maxlength="100" placeholder="例：14日の早番が2名になるよう調整してください"></div>';
+      m.foot.innerHTML = '<button class="btn danger left" data-back' + (list.length ? '' : ' disabled') + '>差戻す</button><button class="btn" data-close>閉じる</button>' +
+        '<button class="btn stamp" data-ok' + (list.length ? '' : ' disabled') + '>承認印を押す（' + list.length + '件）</button>';
+    }
+    draw();
+    m.body.addEventListener('change', function (e) {
+      if (e.target.id === 'ap-draft') { includeDraft = e.target.checked; draw(); return; }
+      var n = $$('input[data-id]:checked', m.body).length;
+      var b = $('[data-ok]', m.foot); if (b) b.textContent = '承認印を押す（' + n + '件）';
+    });
+    m.foot.addEventListener('click', function (e) {
+      var ids = $$('input[data-id]:checked', m.body).map(function (x) { return x.getAttribute('data-id'); });
+      if (e.target.closest('[data-ok]')) {
+        if (!ids.length) { toast('1件以上選んでください', 'err'); return; }
+        api('api_approve', { token: state.token, facilityId: state.facilityId, ids: ids }).then(function (res) {
+          applySaved(res); m.close(); showStamp(res.approver); render();
+          toast('承認印を押しました。' + (res.updated.length + res.deleted.length) + '件が確定しました。', 'ok');
+        }).catch(function (err) { handleErr(err, openApprove); });
+      }
+      if (e.target.closest('[data-back]')) {
+        var reason = $('#ap-reason', m.body).value;
+        var pend = ids.filter(function (id) { return state.shifts[id] && state.shifts[id].status === ST.PENDING; });
+        if (!pend.length) { toast('差戻せるのは「承認待ち」の勤務です', 'err'); return; }
+        api('api_sendBack', { token: state.token, facilityId: state.facilityId, ids: pend, reason: reason }).then(function (res) {
+          applySaved(res); m.close(); render();
+          toast(res.updated.length + '件を差戻しました（変更中に戻りました）', 'ok');
+        }).catch(function (err) { handleErr(err); });
+      }
+    });
+  }
+
+  // ---------- ログイン ----------
+  function openLogin(opt) {
+    opt = opt || {};
+    var accs = state.m.accounts.slice();
+    var fid = opt.facilityId || (state.page === 'facility' ? state.facilityId : '');
+    accs.sort(function (a, b) {
+      var sa = a.role === '本部' ? (state.page === 'hq' ? 0 : 2) : a.facilityId === fid ? 1 : 3;
+      var sb = b.role === '本部' ? (state.page === 'hq' ? 0 : 2) : b.facilityId === fid ? 1 : 3;
+      return sa - sb;
+    });
+    var sel = null, pin = '';
+    var m = openModal({ title: '承認者としてログイン', sub: esc(opt.reason || '園長・主任・本部のアカウントでログインすると、承認印を押せます。') });
+    function draw() {
+      var facName = function (id) { var f = facility(id); return f ? f.name : ''; };
+      m.body.innerHTML = '<div class="acc-grid">' + accs.map(function (a) {
+        return '<button class="acc" data-acc="' + esc(a.id) + '" aria-pressed="' + (sel === a.id) + '"><div><b>' + esc(a.name) + '</b></div><div class="r">' + esc(a.role) + (a.facilityId ? '・' + esc(facName(a.facilityId)) : '（全園）') + '</div>' +
+          (a.demoPin ? '<div class="hint">デモ用暗証番号：' + esc(a.demoPin) + '</div>' : '') + '</button>';
+      }).join('') + '</div>' +
+        (sel ? '<div class="pin-display" aria-label="入力済みの桁数">' + [0, 1, 2, 3, 4, 5].slice(0, Math.max(4, pin.length)).map(function (i) { return '<i class="' + (i < pin.length ? 'on' : '') + '"></i>'; }).join('') + '</div>' +
+          '<div class="keypad">' + ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', '←'].map(function (k) { return '<button data-key="' + k + '">' + k + '</button>'; }).join('') + '</div>' : '<p class="small muted">アカウントを選んで、暗証番号を入力してください。</p>');
+      m.foot.innerHTML = '<button class="btn" data-close>キャンセル</button><button class="btn primary" data-ok' + (sel && pin.length >= 4 ? '' : ' disabled') + '>ログイン</button>';
+    }
+    draw();
+    m.body.addEventListener('click', function (e) {
+      var a = e.target.closest('[data-acc]');
+      if (a) { sel = a.getAttribute('data-acc'); pin = ''; draw(); return; }
+      var k = e.target.closest('[data-key]');
+      if (k) {
+        var v = k.getAttribute('data-key');
+        if (v === 'C') pin = ''; else if (v === '←') pin = pin.slice(0, -1); else if (pin.length < 8) pin += v;
+        draw();
+      }
+    });
+    m.foot.addEventListener('click', function (e) {
+      if (!e.target.closest('[data-ok]')) return;
+      api('api_login', { accountId: sel, pin: pin }).then(function (res) {
+        state.token = res.token; state.user = res.user; LS.set('token', res.token);
+        m.close(); render();
+        toast(res.user.name + ' でログインしました', 'ok');
+        if (opt.then) opt.then();
+      }).catch(function (err) { pin = ''; draw(); toast(errMsg(err), 'err'); });
+    });
+  }
+  function openUserMenu() {
+    var m = openModal({ title: state.user ? 'ログイン中' : '入力者・ログイン' });
+    if (state.user) {
+      m.body.innerHTML = '<p><b>' + esc(state.user.name) + '</b>（' + esc(state.user.role) + '）でログインしています。' + (state.user.role === '本部' ? 'すべての園で承認印を押せます。' : 'この園で承認印を押せます。') + '</p>';
+      m.foot.innerHTML = '<button class="btn" data-close>閉じる</button><button class="btn danger" data-logout>ログアウト</button>';
+      $('[data-logout]', m.foot).addEventListener('click', function () {
+        api('api_logout', { token: state.token }).catch(function () {});
+        state.token = ''; state.user = null; LS.set('token', '');
+        m.close(); render(); toast('ログアウトしました');
+      });
+    } else {
+      m.body.innerHTML = '<p>現在の入力者：<b>' + esc(state.editor || '未選択') + '</b></p><p class="small muted">勤務の入力・変更はだれでもできます（入力者として記録されます）。承認印を押すには、園長・主任・本部のアカウントでログインします。</p>';
+      m.foot.innerHTML = '<button class="btn" data-who>入力者を変える</button><button class="btn stamp" data-login>承認者としてログイン</button>';
+      $('[data-who]', m.foot).addEventListener('click', function () { m.close(); openWho(); });
+      $('[data-login]', m.foot).addEventListener('click', function () { m.close(); openLogin({}); });
+    }
+  }
+
+  // ---------- メニュー ----------
+  function openMenu() {
+    var m = openModal({ title: 'メニュー' });
+    var items = [
+      ['summary', '勤務時間の集計', '誰が・いつ・何時間働いたか（月ごと）。CSV・スプレッドシートに出力'],
+      ['rules', '配置基準と判定のしくみ', '照合しているルールと、充足・要確認・不足の決め方'],
+      ['history', '変更履歴', '誰がいつ何を変えたか'],
+      ['print', '印刷する', '表示中の一覧を印刷（A3横を想定）'],
+      ['refresh', '最新の内容に更新', 'ほかのタブレットで入力された内容を読み込みます']
+    ];
+    m.body.innerHTML = '<div class="list">' + items.map(function (it) {
+      return '<button class="row" data-m="' + it[0] + '" style="width:100%;border:0;text-align:left"><div class="main"><div class="a">' + esc(it[1]) + '</div><div class="c">' + esc(it[2]) + '</div></div><span class="muted">›</span></button>';
+    }).join('') + '</div>' +
+      '<div class="field" style="margin-top:14px"><span class="lbl">表示の大きさ</span><div class="seg">' +
+      [['compact', '小'], ['normal', '標準'], ['large', '大']].map(function (x) { return '<button data-density="' + x[0] + '" aria-pressed="' + (state.density === x[0]) + '">' + x[1] + '</button>'; }).join('') + '</div></div>' +
+      (state.sheetUrl && !window.__PREVIEW__ ? '<p><a href="' + esc(state.sheetUrl) + '" target="_blank" rel="noopener">保存先のスプレッドシートを開く ↗</a></p>' : '');
+    m.foot.innerHTML = '<button class="btn" data-close>閉じる</button>';
+    m.body.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-m]');
+      if (b) {
+        var k = b.getAttribute('data-m');
+        m.close();
+        if (k === 'summary') openSummary();
+        if (k === 'rules') openRules();
+        if (k === 'history') openHistory();
+        if (k === 'print') setTimeout(function () { window.print(); }, 200);
+        if (k === 'refresh') reloadRange(true);
+        return;
+      }
+      var dn = e.target.closest('[data-density]');
+      if (dn) { setDensity(dn.getAttribute('data-density')); m.close(); }
+    });
+  }
+  function setDensity(d) {
+    state.density = d; LS.set('density', d);
+    document.body.classList.remove('density-compact', 'density-large');
+    if (d !== 'normal') document.body.classList.add('density-' + d);
+    render();
+  }
+
+  // ---------- 集計 ----------
+  function csvCell(v) { var s = String(v === null || v === undefined ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+  function download(name, rows) {
+    var csv = '﻿' + rows.map(function (r) { return r.map(csvCell).join(','); }).join('\r\n');
+    try {
+      var blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = name;
+      document.body.appendChild(a); a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); a.parentNode.removeChild(a); }, 1000);
+    } catch (e) {
+      window.open('data:text/csv;charset=utf-8,' + encodeURIComponent(csv));
+    }
+  }
+  function openSummary() {
+    var ym = state.anchor.slice(0, 7);
+    var m = openModal({ title: '勤務時間の集計', sub: esc(facility().name), wide: true });
+    function draw() {
+      var from = ym + '-01', to = S.monthEnd(from);
+      m.head.innerHTML = '勤務時間の集計<span class="sub">' + esc(facility().name) + '・' + (+ym.slice(0, 4)) + '年' + (+ym.slice(5, 7)) + '月</span>';
+      m.body.innerHTML = '<div class="empty-note"><div class="spinner" style="margin:0 auto"></div></div>';
+      ensureLoaded(from, to).then(function () {
+        var list = shiftsIn(from, to);
+        var rows = S.staffSummary(ctxOf(state.facilityId), list);
+        var tot = { days: 0, workMin: 0, fixedWorkMin: 0, paid: 0, sat: 0 };
+        rows.forEach(function (r) { tot.days += r.days; tot.workMin += r.workMin; tot.fixedWorkMin += r.fixedWorkMin; tot.paid += r.paid; tot.sat += r.satDays; });
+        m.body.innerHTML = '<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">' +
+          '<button class="btn small" data-ym="-1">◀ 前月</button><button class="btn small" data-ym="1">次月 ▶</button>' +
+          '<span class="small muted">実働＝退勤−出勤−休憩。「確定分」は承認印が押された勤務のみの合計です。</span></div>' +
+          '<div class="day-summary" style="padding:0 0 10px">' + kpi('出勤延べ', tot.days + '日') + kpi('実働合計', hoursText(tot.workMin) + 'h') + kpi('うち確定分', hoursText(tot.fixedWorkMin) + 'h') + kpi('土曜出勤延べ', tot.sat + '日') + kpi('有休', tot.paid + '日') + '</div>' +
+          '<div class="table-scroll"><table class="plain"><thead><tr><th>氏名</th><th>職種</th><th>雇用</th><th class="r">出勤日数</th><th class="r">うち土曜</th><th class="r">公休・振休</th><th class="r">有休</th><th class="r">実働計(h)</th><th class="r">確定分(h)</th><th class="r">未確定</th><th class="r">休憩不足</th></tr></thead><tbody>' +
+          rows.map(function (r) {
+            return '<tr><td><b>' + esc(r.name) + '</b></td><td>' + esc(r.job) + '</td><td>' + esc(r.employment) + '</td><td class="r num">' + r.days + '</td><td class="r num">' + r.satDays + '</td><td class="r num">' + r.off + '</td><td class="r num">' + r.paid +
+              '</td><td class="r num"><b>' + hoursText(r.workMin) + '</b></td><td class="r num">' + hoursText(r.fixedWorkMin) + '</td><td class="r num">' + (r.unfixed || '') + '</td><td class="r num" style="color:var(--warn)">' + (r.warnings || '') + '</td></tr>';
+          }).join('') + '</tbody></table></div>';
+        m.foot.innerHTML = '<button class="btn left" data-csv="detail">CSV：勤務明細</button><button class="btn" data-csv="sum">CSV：集計</button>' +
+          '<button class="btn primary" data-export>スプレッドシートに月次集計を作成</button>';
+        m._rows = rows; m._list = list;
+      }).catch(function (e) { handleErr(e); });
+    }
+    draw();
+    m.body.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-ym]');
+      if (b) { ym = S.addMonths(ym + '-01', Number(b.getAttribute('data-ym'))).slice(0, 7); draw(); }
+    });
+    m.foot.addEventListener('click', function (e) {
+      var c = e.target.closest('[data-csv]');
+      var fname = facility().name;
+      if (c && c.getAttribute('data-csv') === 'detail') {
+        var head = ['勤務ID', '園名', '日付', '曜日', '職員ID', '氏名', '勤務区分', '種類', '出勤', '退勤', '休憩開始', '休憩(分)', '拘束時間(h)', '実働時間(h)', '配置クラス', '時間帯別の配置', '状態', '入力者', '入力日時', '承認者', '承認日時', '備考'];
+        var rows = m._list.slice().sort(function (a, b) { return a.date === b.date ? (a.staffId < b.staffId ? -1 : 1) : a.date < b.date ? -1 : 1; }).map(function (s) {
+          var hrs = S.calcHours(s); var cl = classById(s.classId);
+          return [s.id, fname, s.date, S.DOW[S.dow(s.date)], s.staffId, s.staffName, s.type, s.kind, s.start, s.end, s.breakStart, s.breakMin, hrs.span, hrs.work, cl ? cl.name : '', s.segments, s.status, s.editor, s.editedAt, s.approver, s.approvedAt, s.note];
+        });
+        download('勤務明細_' + fname + '_' + ym + '.csv', [head].concat(rows));
+      }
+      if (c && c.getAttribute('data-csv') === 'sum') {
+        var head2 = ['年月', '園名', '職員ID', '氏名', '職種', '雇用形態', '出勤日数', 'うち土曜', '公休・振休', '有休', '研修', '拘束時間計(h)', '実働時間計(h)', 'うち確定分(h)', '未確定の件数', '休憩不足の件数'];
+        download('月次集計_' + fname + '_' + ym + '.csv', [head2].concat(m._rows.map(function (r) {
+          return [ym, fname, r.staffId, r.name, r.job, r.employment, r.days, r.satDays, r.off, r.paid, r.train, S.round2(r.spanMin / 60), S.round2(r.workMin / 60), S.round2(r.fixedWorkMin / 60), r.unfixed, r.warnings];
+        })));
+      }
+      if (e.target.closest('[data-export]')) {
+        api('api_exportMonthly', { ym: ym }).then(function (res) {
+          if (window.__PREVIEW__) { toast('プレビューのため、スプレッドシートへの書き出しは行いません（GAS版では「月次集計」シートに ' + res.rows + ' 行を作成します）'); return; }
+          toast('「' + res.sheetName + '」シートに ' + res.rows + ' 行を作成しました', 'ok');
+          if (res.url) window.open(res.url, '_blank');
+        }).catch(function (err) { handleErr(err); });
+      }
+    });
+  }
+
+  // ---------- 配置基準の説明 ----------
+  function openRules() {
+    var fac = facility();
+    var ctx = ctxOf(fac.id);
+    var st = settings();
+    var m = openModal({ title: '配置基準と判定のしくみ', sub: esc(fac.name + '（' + fac.kind + '）'), wide: true });
+    var rules = state.m.rules.slice().sort(function (a, b) { return a.age - b.age; });
+    var att = state.m.attendance.filter(function (a) { return a.facilityId === fac.id; });
+    var attText = function (dt) { return att.filter(function (a) { return a.dayType === dt; }).map(function (a) { return a.time + ' ' + a.rate + '%'; }).join('、'); };
+    m.body.innerHTML =
+      '<h3 style="margin-top:0">1. 照合している配置基準（職員1人あたりの子どもの数）</h3>' +
+      '<table class="plain"><thead><tr><th>年齢</th><th class="r">基準</th><th>備考</th></tr></thead><tbody>' +
+      rules.map(function (r) { return '<tr><td>' + esc(r.label) + '</td><td class="r num"><b>' + esc(r.perStaff) + ' : 1</b></td><td class="small">' + esc(r.note) + '</td></tr>'; }).join('') +
+      '</tbody></table>' +
+      '<p class="small muted">根拠：' + esc((rules[0] || {}).basis || '') + '。値は「配置基準」シートで変更できます（自治体の上乗せ基準や、1歳児5:1の運用など）。</p>' +
+      '<h3>2. 判定のしかた（15分ごと）</h3>' +
+      '<ul style="padding-left:1.2em;margin-top:0">' +
+      '<li><b>園全体</b>（開所 ' + esc(fac.open) + '〜' + esc(fac.close) + '、土曜 ' + esc(fac.satOpen) + '〜' + esc(fac.satClose) + '）：その時間にいる子どもの数を年齢ごとに基準で割り、小数点第1位までの合計を四捨五入して必要人数を出します。子どもがいる間は常に <b>' + esc(ctx.minStaff) + '名以上</b> 必要です。</li>' +
+      '<li><b>クラスごと</b>（クラス別保育 ' + esc(fac.classStart) + '〜' + esc(fac.classEnd) + (S.bool(fac.satClassCheck, false) ? '、土曜も判定' : '、土曜は合同のため園全体のみ') + '）：クラスの子どもの数から必要人数（切り上げ、最低1名）を出し、そのクラスに配置されている職員と比べます。それ以外の時間は合同保育として園全体で判定します。</li>' +
+      '<li>数えるのは「保育に従事（配置に数える）」職員です。' + (ctx.breakExcluded ? '<b>休憩中の職員は数えません。</b>' : '休憩中の職員も数えます。') + '研修・調理・事務などは数えません。</li>' +
+      '<li>子どもの数は「時間帯別在園率」から見込みます。平日：' + esc(attText('平日')) + '。土曜：' + esc(attText('土曜')) + '。</li>' +
+      '</ul>' +
+      '<h3>3. 結果の見方</h3>' +
+      '<table class="plain"><tbody>' +
+      '<tr><td>' + ck('ok') + ' <b>充足</b></td><td>必要人数を有資格者だけで満たしている</td></tr>' +
+      '<tr><td>' + ck('warn') + ' <b>要確認</b></td><td>人数は足りているが、有資格者だけでは必要人数に届かない時間（補助者・子育て支援員で補っている）。朝夕の「2名のうち1名」特例（必要数の合計が ' + esc(ctx.tokurei) + ' 以下）や、有資格者が必要数の3分の2以上いる場合です。特例を使える条件か、自治体の基準を確認してください。</td></tr>' +
+      '<tr><td>' + ck('short') + ' <b>不足</b></td><td>配置人数が必要人数より少ない、または有資格者が必要数の3分の2に届かない</td></tr>' +
+      '</tbody></table>' +
+      '<p class="small muted">※ 配置基準は、児童福祉施設の設備及び運営に関する基準・幼保連携型認定こども園の基準（令和6年4月改正後）をもとにしています。経過措置・特例・自治体独自の基準は園の所在地の条例・通知で必ず確認してください。この画面の判定は、勤務表の確認を助けるための目安です。</p>';
+    m.foot.innerHTML = '<button class="btn primary" data-close>閉じる</button>';
+  }
+
+  // ---------- 変更履歴 ----------
+  function openHistory() {
+    var m = openModal({ title: '変更履歴', sub: esc(facility().name + '（新しい順・最大150件）'), wide: true });
+    m.body.innerHTML = '<div class="empty-note"><div class="spinner" style="margin:0 auto"></div></div>';
+    m.foot.innerHTML = '<button class="btn primary" data-close>閉じる</button>';
+    api('api_history', { facilityId: state.facilityId, limit: 150 }).then(function (list) {
+      if (!list.length) { m.body.innerHTML = '<div class="empty-note">まだ履歴はありません。</div>'; return; }
+      m.body.innerHTML = '<div class="table-scroll"><table class="plain"><thead><tr><th>日時</th><th>操作</th><th>対象</th><th>変更前</th><th>変更後</th><th>実行者</th></tr></thead><tbody>' +
+        list.map(function (h) {
+          return '<tr><td class="num small">' + esc(String(h.at).slice(5, 16)) + '</td><td>' + esc(h.action) + '</td><td>' + esc(h.date ? S.mdLabel(h.date) + ' ' : '') + esc(h.staffName || '') + '</td><td class="small">' + esc(h.before || '') + '</td><td class="small">' + esc(h.after || '') + '</td><td>' + esc(h.by || '') + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }).catch(function (e) { handleErr(e); });
+  }
+
+  // ------------------------------------------------------------------
+  // 本部の画面
+  // ------------------------------------------------------------------
+  function hqRange() { return viewRange(state.hq.view, state.hq.anchor); }
+  function loadHQ() {
+    var r = hqRange();
+    state.hq.loading = true;
+    renderHQ();
+    return api('api_hqSummary', { token: state.token, from: r.from, to: r.to }).then(function (res) {
+      state.hq.data = res; state.hq.loading = false; state.hq.key = r.from + r.to;
+      if (state.page === 'hq') renderHQ();
+    }).catch(function (e) { state.hq.loading = false; state.hq.data = null; renderHQ(); handleErr(e, loadHQ); });
+  }
+  function pct(x) { return x === null || x === undefined ? '—' : (Math.round(x * 1000) / 10).toFixed(1); }
+  function renderHQ() {
+    var page = $('#page');
+    var keep = keepScroll();
+    var hq = state.hq, r = hqRange();
+    var h = '<div class="toolbar"><span class="date-title" style="min-width:0;text-align:left">本部：園の比較</span>' +
+      '<div class="seg" role="group" aria-label="表示期間">' + ['month', 'week', 'day'].map(function (v) { return '<button data-act="hqview" data-view="' + v + '" aria-pressed="' + (hq.view === v) + '">' + { month: '月', week: '週', day: '日' }[v] + '</button>'; }).join('') + '</div>' +
+      '<div class="date-nav"><button class="btn icon" data-act="hqnav" data-dir="-1" aria-label="前へ">◀</button><label class="date-title">' + esc(rangeTitle(hq.view, hq.anchor)) + '<input type="date" data-change="hqdate" value="' + esc(hq.anchor) + '" aria-label="日付を選ぶ"></label><button class="btn icon" data-act="hqnav" data-dir="1" aria-label="次へ">▶</button><button class="btn small" data-act="hqnav" data-dir="0">今日</button></div>' +
+      '<div class="grow"></div><button class="btn" data-act="hqreload">最新に更新</button></div>';
+    var data = hq.data;
+    if (!data || hq.key !== r.from + r.to) {
+      page.innerHTML = h + '<div class="empty-note"><div class="spinner" style="margin:0 auto 10px"></div>各園の勤務と配置を集計しています…</div>';
+      if (!hq.loading) loadHQ();
+      return;
+    }
+    // 園ごとのカード
+    h += '<div class="hq-cards">' + data.facilities.map(function (f) {
+      var tot = f.counts.ok + f.counts.warn + f.counts.short || 1;
+      var ap = f.approval, apt = Math.max(1, ap.total);
+      var openDays = f.days.filter(function (d) { return !d.closed; });
+      var shortDays = openDays.filter(function (d) { return d.worst === 'short'; }).length;
+      return '<article class="fcard"><div class="head"><h3>' + esc(f.name) + '</h3><span class="k">' + esc(f.kind) + '・職員 ' + f.staffCount + '名</span></div>' +
+        '<div class="rate"><span class="v num">' + pct(f.rate) + '</span><span class="u">% 充足（15分ごとの判定のうち）</span></div>' +
+        '<div class="meter" title="充足・要確認・不足の割合"><i style="width:' + (f.counts.ok / tot * 100) + '%;background:var(--ok)"></i><i style="width:' + (f.counts.warn / tot * 100) + '%;background:var(--warn-line)"></i><i style="width:' + (f.counts.short / tot * 100) + '%;background:var(--short-line)"></i></div>' +
+        '<div class="badges"><span class="tag short">' + ICON.short.replace('<svg', '<svg width="12" height="12"') + '不足 ' + f.issueCount.short + 'か所</span><span class="tag warn">' + ICON.warn.replace('<svg', '<svg width="12" height="12"') + '要確認 ' + f.issueCount.warn + 'か所</span>' +
+        (openDays.length > 1 ? '<span class="tag ' + (shortDays ? 'short' : 'ok') + '">不足のある日 ' + shortDays + '/' + openDays.length + '日</span>' : '') + '</div>' +
+        '<div class="appr"><div>承認状況：確定 <b class="num">' + ap.fixed + '</b>・承認待ち <b class="num">' + ap.pending + '</b>・変更中 <b class="num">' + ap.draft + '</b></div>' +
+        '<div class="meter"><i style="width:' + (ap.fixed / apt * 100) + '%;background:var(--fixed)"></i><i style="width:' + (ap.pending / apt * 100) + '%;background:var(--warn-line)"></i><i style="width:' + (ap.draft / apt * 100) + '%;background:var(--draft)"></i></div></div>' +
+        '<div class="stats"><span>実働合計 <b>' + hoursText(f.hours.workMin) + '</b>h</span><span>出勤延べ <b>' + f.hours.workDays + '</b>日</span><span>土曜出勤 <b>' + f.hours.satDays + '</b>日</span><span>有休 <b>' + f.hours.paid + '</b>日</span></div>' +
+        '<div class="foot"><button class="btn primary" data-act="hqopen" data-fid="' + esc(f.id) + '" data-date="' + esc(hq.view === 'day' ? hq.anchor : '') + '">この園の画面を開く</button></div></article>';
+    }).join('') + '</div>';
+
+    // 比較表
+    if (hq.view === 'day') h += hqDayHTML(data);
+    else h += hqMatrixHTML(data, hq.view);
+
+    // 不足・要確認の一覧
+    var all = [];
+    data.facilities.forEach(function (f) { f.issues.forEach(function (i) { all.push({ f: f, i: i }); }); });
+    var list = all.filter(function (x) { return (hq.filter === 'all' || x.i.status === hq.filter) && (!hq.fac || x.f.id === hq.fac); })
+      .sort(function (a, b) { return a.i.date === b.i.date ? (a.f.id < b.f.id ? -1 : a.f.id > b.f.id ? 1 : a.i.from - b.i.from) : a.i.date < b.i.date ? -1 : 1; });
+    var shown = list.slice(0, hq.more ? 1000 : 120);
+    h += '<div class="section-title">不足・要確認の箇所 <span class="muted">' + list.length + '件</span></div>' +
+      '<div class="panel"><div class="panel-head">' +
+      [['all', 'すべて'], ['short', '不足のみ'], ['warn', '要確認のみ']].map(function (x) { return '<button class="chip" data-act="hqf" data-f="' + x[0] + '" aria-pressed="' + (hq.filter === x[0]) + '">' + x[1] + '</button>'; }).join('') +
+      '<span class="sep" style="width:8px"></span><button class="chip" data-act="hqfac" data-fid="" aria-pressed="' + (!hq.fac) + '">全園</button>' +
+      data.facilities.map(function (f) { return '<button class="chip" data-act="hqfac" data-fid="' + esc(f.id) + '" aria-pressed="' + (hq.fac === f.id) + '">' + esc(f.name) + '</button>'; }).join('') +
+      '</div>' + (shown.length ? '<div class="table-scroll" style="border:0;border-radius:0;max-height:none"><table class="plain"><thead><tr><th>判定</th><th>日付</th><th>園</th><th>場所</th><th>時間帯</th><th>内容</th><th></th></tr></thead><tbody>' +
+      shown.map(function (x) {
+        var i = x.i;
+        return '<tr><td>' + ck(i.status, i.status === 'short' ? '不足' : '要確認') + '</td><td class="num">' + esc(S.mdLabel(i.date)) + '</td><td>' + esc(x.f.name) + '</td><td><b>' + esc(i.label) + '</b></td><td class="num">' + esc(i.fromText) + '〜' + esc(i.toText) + '</td>' +
+          '<td class="small">必要' + i.req + '・配置' + i.n + '・有資格' + i.q + (i.status === 'short' && i.why === 'count' ? '（' + i.shortBy + '名不足）' : '（' + esc(S.WHY_TEXT[i.why] || '') + '）') + '</td>' +
+          '<td><button class="btn small" data-act="hqopen" data-fid="' + esc(x.f.id) + '" data-date="' + esc(i.date) + '">開く</button></td></tr>';
+      }).join('') + '</tbody></table></div>' + (list.length > shown.length ? '<div style="padding:10px;text-align:center"><button class="btn small" data-act="hqmore">残り ' + (list.length - shown.length) + '件を表示</button></div>' : '')
+        : '<div class="empty-note">該当する箇所はありません。</div>') + '</div>';
+
+    // 勤務時間の比較
+    h += '<div class="section-title">勤務時間の比較 <span class="muted">労務管理・給与計算の確認用（実働＝退勤−出勤−休憩）</span></div>' +
+      '<div class="panel"><div class="table-scroll" style="border:0;border-radius:0;max-height:none"><table class="plain"><thead><tr><th>園</th><th class="r">職員数</th><th class="r">出勤延べ(日)</th><th class="r">実働合計(h)</th><th class="r">1人あたり(h)</th><th class="r">土曜出勤延べ</th><th class="r">有休(日)</th><th class="r">休憩不足</th><th class="r">未確定の勤務</th></tr></thead><tbody>' +
+      data.facilities.map(function (f) {
+        return '<tr><td><b>' + esc(f.name) + '</b></td><td class="r num">' + f.staffCount + '</td><td class="r num">' + f.hours.workDays + '</td><td class="r num"><b>' + hoursText(f.hours.workMin) + '</b></td><td class="r num">' + hoursText(f.hours.workMin / Math.max(1, f.staffCount)) +
+          '</td><td class="r num">' + f.hours.satDays + '</td><td class="r num">' + f.hours.paid + '</td><td class="r num">' + (f.hours.laborWarnings || 0) + '</td><td class="r num">' + (f.approval.pending + f.approval.draft) + '</td></tr>';
+      }).join('') + '</tbody></table></div></div>';
+    page.innerHTML = h;
+    restoreScroll(keep);
+  }
+  function hqMatrixHTML(data, view) {
+    var week = view === 'week';
+    var dates = data.facilities[0] ? data.facilities[0].days.map(function (d) { return d.date; }) : [];
+    var h = '<div class="section-title">日ごとの充足状況 <span class="muted">セルを押すと、その日の不足箇所を表示します。▸ でクラス別に開きます。</span></div>';
+    h += '<div class="grid-wrap" style="max-height:none"><table class="cmp' + (week ? ' week' : '') + '"><thead><tr><th class="name"><span class="small muted">園 ＼ 日付</span></th>' +
+      dates.map(function (d) {
+        var dw = S.dow(d), hol = S.holidayName(d);
+        return '<th class="dc' + (dw === 6 ? ' sat' : '') + (dw === 0 || hol ? ' sun closed' : '') + (d === state.today ? ' today' : '') + '"><div class="dhead" style="cursor:default">' +
+          (week ? '<span class="d">' + (+d.slice(5, 7)) + '/' + (+d.slice(8, 10)) + '</span><span class="w">' + S.DOW[dw] + '</span>' : '<span class="d">' + (+d.slice(8, 10)) + '</span><span class="w">' + S.DOW[dw] + '</span>') + '</div></th>';
+      }).join('') + '</tr></thead><tbody>';
+    data.facilities.forEach(function (f) {
+      var open = !!state.hq.expanded[f.id];
+      h += '<tr><th class="name"><button class="expander" data-act="hqexp" data-fid="' + esc(f.id) + '" aria-expanded="' + open + '"><span class="car">▸</span><span class="fname">' + esc(f.name) + '</span></button></th>';
+      f.days.forEach(function (d) {
+        if (d.closed) { h += '<td class="dc bg-na"><div class="cb na">' + (week ? esc(d.closed) : '休') + '</div></td>'; return; }
+        var txt = d.worst === 'short' ? (week ? '不足 ' + d.shortCount + 'か所' : String(d.shortCount)) : d.worst === 'warn' ? (week ? '要確認 ' + d.warnCount + 'か所' : '!') : (week ? '充足' : '✓');
+        var detail = '';
+        if (week) {
+          var worstRows = d.rows.filter(function (r) { return r.worst === 'short' || r.worst === 'warn'; }).slice(0, 3);
+          detail = worstRows.map(function (r) { return '<span>' + (r.worst === 'short' ? '× ' : '! ') + esc(r.label) + ' ' + Math.round((r.worst === 'short' ? r.shortMin : r.warnMin)) + '分</span>'; }).join('');
+        }
+        h += '<td class="dc bg-' + d.worst + '"><button class="cb ' + d.worst + '" data-act="hqcell" data-fid="' + esc(f.id) + '" data-date="' + esc(d.date) + '" title="' + esc(S.mdLabel(d.date) + ' ' + f.name + '：' + CK_LABEL[d.worst] + (d.shortMin ? ' 不足のべ' + d.shortMin + '分' : '')) + '"><b>' + esc(txt) + '</b>' + detail + '</button></td>';
+      });
+      h += '</tr>';
+      if (open) {
+        (f.days.filter(function (d) { return !d.closed; })[0] || { rows: [] }).rows.forEach(function (row) {
+          var c = f.classes.filter(function (x) { return x.id === row.key; })[0];
+          h += '<tr class="sub"><th class="name">' + (c ? '<span class="dot" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;background:' + esc(c.color) + '"></span>' : '') + esc(row.label) + '</th>';
+          f.days.forEach(function (d) {
+            if (d.closed) { h += '<td class="dc"><div class="cb na"></div></td>'; return; }
+            var rr = d.rows.filter(function (x) { return x.key === row.key; })[0] || { worst: 'na' };
+            var t = rr.worst === 'short' ? (week ? '不足 ' + rr.shortMin + '分' : rr.shortMin + '') : rr.worst === 'warn' ? (week ? '要確認 ' + rr.warnMin + '分' : '!') : rr.worst === 'ok' ? '✓' : '';
+            h += '<td class="dc"><button class="cb ' + rr.worst + '" data-act="hqcell" data-fid="' + esc(f.id) + '" data-date="' + esc(d.date) + '" title="' + esc(row.label + ' ' + S.mdLabel(d.date)) + '">' + esc(t) + '</button></td>';
+          });
+          h += '</tr>';
+        });
+      }
+    });
+    h += '</tbody></table></div>';
+    return h;
+  }
+  function hqDayHTML(data) {
+    var h = '<div class="section-title">' + esc(S.mdLabel(state.hq.anchor)) + ' の配置（園ごと・30分単位）<span class="muted">数字は 配置／必要</span></div><div class="hq-day">';
+    data.facilities.forEach(function (f) {
+      var d = f.days[0];
+      if (!d || d.closed) { h += '<div class="box"><h4>' + esc(f.name) + ' <span class="small muted">休園日（' + esc(d ? d.closed : '') + '）</span></h4></div>'; return; }
+      var times = d.times, cols = [];
+      for (var i = 0; i < times.length; i += 2) cols.push(i);
+      h += '<div class="box"><h4>' + esc(f.name) + ' ' + ck(d.worst, d.worst === 'short' ? '不足' + d.shortCount : d.worst === 'warn' ? '要確認' + d.warnCount : '充足') +
+        '<button class="btn small" data-act="hqopen" data-fid="' + esc(f.id) + '" data-date="' + esc(d.date) + '" style="margin-left:auto">この日の園画面</button></h4>' +
+        '<div style="overflow-x:auto"><table class="tl"><thead><tr><th class="name"></th>' + cols.map(function (i) { var t = times[i]; return '<th class="tcol' + (t % 60 ? ' half' : '') + '">' + (t % 60 ? '' : t / 60 + ':00') + '</th>'; }).join('') + '</tr></thead><tbody>' +
+        d.matrix.map(function (row) {
+          return '<tr><th class="name"><div class="grp-name">' + (row.color ? '<span class="dot" style="background:' + esc(row.color) + '"></span>' : '') + esc(row.label) + '</div></th>' + cols.map(function (i) {
+            var a = row.cells[i], b = row.cells[i + 1] || a;
+            var rank = { na: 0, ok: 1, warn: 2, short: 3 };
+            var w = rank[b[0]] > rank[a[0]] ? b : a;
+            if (w[0] === 'na') return '<td class="cv na">' + (row.key === 'all' ? '' : '<small>合同</small>') + '</td>';
+            return '<td class="cv ' + w[0] + '">' + w[2] + '/' + w[1] + '</td>';
+          }).join('') + '</tr>';
+        }).join('') + '</tbody></table></div></div>';
+    });
+    return h + '</div>';
+  }
+  function openHqDetail(fid, date) {
+    var f = state.hq.data.facilities.filter(function (x) { return x.id === fid; })[0];
+    var iss = f.issues.filter(function (i) { return i.date === date; });
+    var m = openModal({ title: f.name + '　' + S.mdLabel(date), sub: iss.length ? '不足・要確認 ' + iss.length + '件' : 'すべての時間帯で充足' });
+    m.body.innerHTML = iss.length ? '<div class="issues" style="margin:0">' + iss.map(function (i) {
+      return '<div class="issue ' + i.status + '">' + ck(i.status) + '<div><div class="t">' + esc(i.label) + ' <span class="num">' + esc(i.fromText) + '〜' + esc(i.toText) + '</span></div><div class="d">必要' + i.req + '名・配置' + i.n + '名・有資格' + i.q + '名' + (i.why && i.why !== 'count' ? '（' + esc(S.WHY_TEXT[i.why]) + '）' : '') + '</div></div></div>';
+    }).join('') + '</div>' : '<div class="ok-banner" style="margin:0">この日は配置基準を満たしています。</div>';
+    m.foot.innerHTML = '<button class="btn" data-close>閉じる</button><button class="btn primary" data-go>この日の園画面を開く</button>';
+    $('[data-go]', m.foot).addEventListener('click', function () { m.close(); goFacility(fid, date); });
+  }
+  function goFacility(fid, date) {
+    state.page = 'facility'; LS.set('page', 'facility');
+    if (fid !== state.facilityId) { state.facilityId = fid; LS.set('facilityId', fid); state.shifts = {}; dirty(); }
+    if (date) { state.view = 'day'; state.anchor = date; }
+    reloadRange(false);
+  }
+
+  // ------------------------------------------------------------------
+  // 操作
+  // ------------------------------------------------------------------
+  function reloadRange(force) {
+    if (state.page === 'hq') { if (force) state.hq.data = null; render(); return Promise.resolve(); }
+    var r = viewRange();
+    render();
+    return ensureLoaded(r.from, r.to, force).then(function (changed) { if (changed || force) render(); }).catch(function (e) { handleErr(e); });
+  }
+  function move(dir) {
+    if (dir === 0) state.anchor = state.today;
+    else if (state.view === 'month') state.anchor = S.addMonths(state.anchor, dir);
+    else if (state.view === 'week') state.anchor = S.addDays(state.anchor, 7 * dir);
+    else {
+      var d = S.addDays(state.anchor, dir), guard = 0;
+      while (S.closedReason(facility(), d) && guard++ < 7) d = S.addDays(d, dir);
+      state.anchor = d;
+    }
+    reloadRange(false);
+  }
+  function hqMove(dir) {
+    var hq = state.hq;
+    if (dir === 0) hq.anchor = state.today;
+    else if (hq.view === 'month') hq.anchor = S.addMonths(hq.anchor, dir);
+    else if (hq.view === 'week') hq.anchor = S.addDays(hq.anchor, 7 * dir);
+    else { var d = S.addDays(hq.anchor, dir); if (S.dow(d) === 0) d = S.addDays(d, dir); hq.anchor = d; }
+    hq.data = null; hq.more = false;
+    renderHQ();
+  }
+
+  document.addEventListener('click', function (e) {
+    var el = e.target.closest('[data-act]');
+    if (!el || el.disabled) return;
+    var act = el.getAttribute('data-act');
+    var ds = el.dataset;
+    switch (act) {
+      case 'page':
+        state.page = ds.page; LS.set('page', ds.page);
+        if (ds.page === 'hq' && !state.hq.anchor) state.hq.anchor = state.anchor;
+        state.quick = null;
+        reloadRange(false); break;
+      case 'view': state.view = ds.view; LS.set('view', ds.view); state.issuesOpen = false; reloadRange(false); break;
+      case 'nav': move(Number(ds.dir)); break;
+      case 'goday':
+        if (state.quick) return;
+        state.view = 'day'; state.anchor = ds.date; reloadRange(false); break;
+      case 'cell':
+        if (state.quick && !modalStack.length) { quickApply(ds.date, ds.staff); }
+        else openEditor(ds.date, ds.staff);
+        break;
+      case 'cls': state.classFilter = ds.cls; render(); break;
+      case 'issues-all': state.issuesOpen = true; render(); break;
+      case 'legend': state.legend = !state.legend; LS.set('legend', state.legend); render(); break;
+      case 'request': openRequest(); break;
+      case 'approve': openApprove(); break;
+      case 'quick':
+        if (state.quick) { state.quick = null; flushQueue(); render(); }
+        else {
+          withEditor(function () {
+            state.quick = (patternsOf(state.facilityId)[0] || {}).name || '日勤';
+            if (state.view === 'day') { state.view = 'month'; reloadRange(false); } else render();
+            toast('下の勤務区分を選んで、マスをタップすると入力されます');
+          });
+        }
+        break;
+      case 'qpat': state.quick = ds.name; renderQuickbar(); break;
+      case 'menu': openMenu(); break;
+      case 'user': openUserMenu(); break;
+      case 'preview-reset':
+        if (confirm('デモデータを最初の状態に戻しますか？')) { window.__resetPreviewData(); state.shifts = {}; state.loaded = {}; state.hq.data = null; dirty(); reloadRange(true); }
+        break;
+      case 'hqview': state.hq.view = ds.view; LS.set('hqView', ds.view); state.hq.data = null; state.hq.more = false; renderHQ(); break;
+      case 'hqnav': hqMove(Number(ds.dir)); break;
+      case 'hqreload': state.hq.data = null; renderHQ(); break;
+      case 'hqopen': goFacility(ds.fid, ds.date || null); break;
+      case 'hqcell': openHqDetail(ds.fid, ds.date); break;
+      case 'hqexp': state.hq.expanded[ds.fid] = !state.hq.expanded[ds.fid]; renderHQ(); break;
+      case 'hqf': state.hq.filter = ds.f; renderHQ(); break;
+      case 'hqfac': state.hq.fac = ds.fid; renderHQ(); break;
+      case 'hqmore': state.hq.more = true; renderHQ(); break;
+    }
+  });
+  document.addEventListener('change', function (e) {
+    var k = e.target.getAttribute('data-change');
+    if (!k) return;
+    if (k === 'facility') {
+      state.facilityId = e.target.value; LS.set('facilityId', state.facilityId);
+      state.shifts = {}; state.classFilter = ''; dirty(); reloadRange(false);
+    }
+    if (k === 'date' && e.target.value) { state.anchor = e.target.value; reloadRange(false); }
+    if (k === 'hqdate' && e.target.value) { state.hq.anchor = e.target.value; state.hq.data = null; renderHQ(); }
+  });
+  document.addEventListener('click', function (e) {
+    var lbl = e.target.closest('.date-title');
+    if (!lbl) return;
+    var inp = $('input[type=date]', lbl);
+    if (inp && inp.showPicker) { try { inp.showPicker(); } catch (er) { /* 対応していないブラウザ */ } }
+  });
+
+  // 自動更新（ほかのタブレットで入力された内容を取り込む）
+  function startAutoRefresh() {
+    var sec = Number(settings().autoRefreshSec || 0);
+    if (!sec) return;
+    setInterval(function () {
+      if (document.hidden || modalStack.length || queue.length || busy || state.quick) return;
+      if (state.page === 'facility') reloadRange(true);
+    }, Math.max(60, sec) * 1000);
+  }
+
+  // ------------------------------------------------------------------
+  // 起動
+  // ------------------------------------------------------------------
+  function start() {
+    shell();
+    if (state.density !== 'normal') document.body.classList.add('density-' + state.density);
+    api('api_bootstrap', { token: state.token }).then(function (res) {
+      state.m = res;
+      state.today = res.today || state.today;
+      state.anchor = state.today;
+      state.hq.anchor = state.today;
+      state.user = res.user; state.token = res.token || '';
+      LS.set('token', state.token);
+      state.sheetUrl = res.sheetUrl;
+      if (!facility(state.facilityId)) state.facilityId = (res.facilities[0] || {}).id;
+      if (!state.facilityId) { $('#page').innerHTML = '<div class="empty-note">園が登録されていません。スプレッドシートの「園」シートを確認してください。</div>'; renderTopbar(); return; }
+      reloadRange(false);
+      startAutoRefresh();
+    }).catch(function (e) {
+      $('#app').innerHTML = '<div class="boot-loading"><p><b>読み込みに失敗しました</b></p><p class="small">' + esc(errMsg(e)) + '</p><button class="btn primary" onclick="location.reload()">再読み込み</button></div>';
+    });
+  }
+  start();
+})();
+</script>

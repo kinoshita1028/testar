@@ -1,0 +1,939 @@
+/**
+ * Shared.gs — サーバー(GAS)とブラウザ画面の両方で使う共通ロジック
+ *
+ *  - 時刻・日付の計算（日本の祝日・休園日を含む）
+ *  - 実働時間の計算
+ *  - 配置基準との照合（園全体／クラスごと、15分単位）
+ *  - デモ用のシフト例の生成
+ *
+ * ※ このファイルを編集したら `node tools/build.mjs` で SharedJs.html を再生成してください。
+ *    （Apps Script エディタだけで運用する場合は、SharedJs.html の <script> 内も同じ内容に貼り替えます）
+ */
+var Shared = (function () {
+  'use strict';
+
+  var STATUS = { DRAFT: '変更中', PENDING: '承認待ち', FIXED: '確定' };
+  var KIND = { WORK: '勤務', OFF: '休み', PAID: '有休', TRAIN: '研修' };
+  var SLOT = 15; // 判定の単位（分）
+  var DOW = ['日', '月', '火', '水', '木', '金', '土'];
+  var APPROVER_ROLES = ['本部', '園長', '主任'];
+
+  // ------------------------------------------------------------------
+  // 時刻・日付
+  // ------------------------------------------------------------------
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function toMin(hhmm) {
+    if (hhmm === null || hhmm === undefined || hhmm === '') return null;
+    var m = /^(\d{1,2}):(\d{2})/.exec(String(hhmm).trim());
+    if (!m) return null;
+    return Number(m[1]) * 60 + Number(m[2]);
+  }
+  function fromMin(min) {
+    if (min === null || min === undefined) return '';
+    var h = Math.floor(min / 60), m = min % 60;
+    return pad2(h) + ':' + pad2(m);
+  }
+  function parseISO(s) { var p = String(s).split('-'); return Date.UTC(+p[0], +p[1] - 1, +p[2]); }
+  function toISO(ms) {
+    var d = new Date(ms);
+    return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate());
+  }
+  function addDays(iso, n) { return toISO(parseISO(iso) + n * 86400000); }
+  function dow(iso) { return new Date(parseISO(iso)).getUTCDay(); }
+  function monthStart(iso) { return iso.slice(0, 8) + '01'; }
+  function monthEnd(iso) { return toISO(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7), 0)); }
+  function addMonths(iso, n) {
+    var y = +iso.slice(0, 4), m = +iso.slice(5, 7) - 1 + n;
+    return toISO(Date.UTC(y, m, 1));
+  }
+  function weekStart(iso) { var d = dow(iso); return addDays(iso, d === 0 ? -6 : 1 - d); } // 月曜はじまり
+  function dateRange(from, to) {
+    var out = [];
+    for (var d = from; d <= to; d = addDays(d, 1)) out.push(d);
+    return out;
+  }
+  function nowJST() { return new Date(Date.now() + 9 * 3600000).toISOString().replace('T', ' ').slice(0, 19); }
+  function todayJST() { return nowJST().slice(0, 10); }
+  function mdLabel(iso) { return (+iso.slice(5, 7)) + '/' + (+iso.slice(8, 10)) + '(' + DOW[dow(iso)] + ')'; }
+  function round2(x) { return Math.round(x * 100) / 100; }
+
+  // 日本の祝日（2000年以降の規則）
+  var holidayCache = {};
+  function holidaysOfYear(y) {
+    if (holidayCache[y]) return holidayCache[y];
+    var h = {};
+    function add(m, d, name) { h[y + '-' + pad2(m) + '-' + pad2(d)] = name; }
+    function nthMonday(m, n) {
+      var first = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+      return 1 + ((8 - first) % 7) + (n - 1) * 7;
+    }
+    add(1, 1, '元日');
+    add(1, nthMonday(1, 2), '成人の日');
+    add(2, 11, '建国記念の日');
+    add(2, 23, '天皇誕生日');
+    add(3, Math.floor(20.8431 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4)), '春分の日');
+    add(4, 29, '昭和の日');
+    add(5, 3, '憲法記念日');
+    add(5, 4, 'みどりの日');
+    add(5, 5, 'こどもの日');
+    add(7, nthMonday(7, 3), '海の日');
+    add(8, 11, '山の日');
+    add(9, nthMonday(9, 3), '敬老の日');
+    add(9, Math.floor(23.2488 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4)), '秋分の日');
+    add(10, nthMonday(10, 2), 'スポーツの日');
+    add(11, 3, '文化の日');
+    add(11, 23, '勤労感謝の日');
+    var keys = Object.keys(h).sort();
+    // 国民の休日（祝日に挟まれた日）
+    for (var i = 0; i < keys.length; i++) {
+      var mid = addDays(keys[i], 1);
+      if (h[addDays(keys[i], 2)] && !h[mid] && dow(mid) !== 0) h[mid] = '国民の休日';
+    }
+    // 振替休日
+    keys.forEach(function (k) {
+      if (dow(k) === 0) {
+        var d = addDays(k, 1);
+        while (h[d]) d = addDays(d, 1);
+        h[d] = '振替休日';
+      }
+    });
+    holidayCache[y] = h;
+    return h;
+  }
+  function holidayName(iso) { return holidaysOfYear(+iso.slice(0, 4))[iso] || ''; }
+  function isYearEnd(iso) { var md = iso.slice(5); return md >= '12-29' || md <= '01-03'; }
+  /** 休園日なら理由を返す（開園日は ''） */
+  function closedReason(facility, iso) {
+    if (dow(iso) === 0) return '日曜';
+    var hn = holidayName(iso);
+    if (hn) return hn;
+    if (isYearEnd(iso)) return '年末年始';
+    var extra = String((facility && facility.closedDates) || '');
+    if (extra && extra.indexOf(iso) >= 0) return '休園日';
+    return '';
+  }
+  function dayType(iso) { return dow(iso) === 6 ? '土曜' : '平日'; }
+
+  // ------------------------------------------------------------------
+  // 勤務（1行 = 1人1日）
+  // ------------------------------------------------------------------
+  function hasTimes(s) { return toMin(s.start) !== null && toMin(s.end) !== null; }
+  function calcHours(s) {
+    if (!hasTimes(s)) return { span: 0, work: 0, spanMin: 0, workMin: 0 };
+    var st = toMin(s.start), en = toMin(s.end);
+    if (en <= st) en += 1440;
+    var span = en - st;
+    var work = Math.max(0, span - (Number(s.breakMin) || 0));
+    return { span: round2(span / 60), work: round2(work / 60), spanMin: span, workMin: work };
+  }
+  function hoursLabel(min) {
+    var h = Math.floor(min / 60), m = min % 60;
+    return h + '時間' + (m ? pad2(m) + '分' : '');
+  }
+  /** 労務上の注意（休憩の不足） */
+  function laborWarnings(s) {
+    var out = [];
+    if (!hasTimes(s)) return out;
+    var hrs = calcHours(s), brk = Number(s.breakMin) || 0;
+    if (hrs.spanMin - brk > 480 && brk < 60) out.push('8時間を超える勤務は休憩60分以上が必要です');
+    else if (hrs.spanMin - brk > 360 && brk < 45) out.push('6時間を超える勤務は休憩45分以上が必要です');
+    return out;
+  }
+  /** "c01@09:00-12:00|c02@12:00-15:00" ⇔ 配列 */
+  function parseSegments(str) {
+    if (!str) return [];
+    return String(str).split('|').map(function (p) {
+      var m = /^\s*([^@]+)@(\d{1,2}:\d{2})-(\d{1,2}:\d{2})\s*$/.exec(p);
+      return m ? { classId: m[1], from: fromMin(toMin(m[2])), to: fromMin(toMin(m[3])) } : null;
+    }).filter(Boolean);
+  }
+  function formatSegments(arr) {
+    return (arr || []).filter(function (x) { return x && x.classId && x.from && x.to; })
+      .map(function (x) { return x.classId + '@' + x.from + '-' + x.to; }).join('|');
+  }
+  function shiftText(s) {
+    if (!s) return '';
+    if (!s.type && !hasTimes(s)) return '（削除予定）';
+    if (!hasTimes(s)) return s.type;
+    return (s.type ? s.type + ' ' : '') + s.start + '〜' + s.end;
+  }
+  function statusCounts(shifts) {
+    var c = { draft: 0, pending: 0, fixed: 0, total: 0 };
+    shifts.forEach(function (s) {
+      c.total++;
+      if (s.status === STATUS.FIXED) c.fixed++;
+      else if (s.status === STATUS.PENDING) c.pending++;
+      else c.draft++;
+    });
+    return c;
+  }
+
+  // ------------------------------------------------------------------
+  // マスタ → 判定用コンテキスト
+  // ------------------------------------------------------------------
+  function settingsMap(rows) {
+    var m = {};
+    (rows || []).forEach(function (r) { m[r.key] = r.value; });
+    return m;
+  }
+  function num(v, d) { var n = Number(v); return isNaN(n) || v === '' || v === null ? d : n; }
+  function bool(v, d) {
+    if (v === true || v === false) return v;
+    if (v === 'TRUE' || v === 'true' || v === '1' || v === 1 || v === 'はい' || v === '○') return true;
+    if (v === 'FALSE' || v === 'false' || v === '0' || v === 0 || v === 'いいえ' || v === '×') return false;
+    return d;
+  }
+  function patternsFor(m, facilityId) {
+    var own = (m.patterns || []).filter(function (p) { return p.facilityId === facilityId; });
+    var names = {};
+    own.forEach(function (p) { names[p.name] = true; });
+    var common = (m.patterns || []).filter(function (p) { return !p.facilityId && !names[p.name]; });
+    return own.concat(common).sort(function (a, b) { return num(a.order, 99) - num(b.order, 99); });
+  }
+  function buildContext(m, facilityId) {
+    var facility = (m.facilities || []).filter(function (f) { return f.id === facilityId; })[0];
+    if (!facility) throw new Error('園が見つかりません: ' + facilityId);
+    var st = settingsMap(m.settings);
+    var classes = (m.classes || []).filter(function (c) { return c.facilityId === facilityId; })
+      .sort(function (a, b) { return num(a.order, 99) - num(b.order, 99); });
+    var staff = (m.staff || []).filter(function (s) { return s.facilityId === facilityId && bool(s.active, true); })
+      .sort(function (a, b) { return num(a.order, 999) - num(b.order, 999); });
+    var staffById = {};
+    (m.staff || []).forEach(function (s) { staffById[s.id] = s; });
+    var ratio = {};
+    (m.rules || []).forEach(function (r) { ratio[Number(r.age)] = num(r.perStaff, 0); });
+    var att = { '平日': [], '土曜': [] };
+    (m.attendance || []).forEach(function (a) {
+      if (a.facilityId !== facilityId && a.facilityId) return;
+      var list = att[a.dayType] || (att[a.dayType] = []);
+      list.push({ t: toMin(a.time), rate: num(a.rate, 0), own: a.facilityId === facilityId });
+    });
+    Object.keys(att).forEach(function (k) {
+      var own = att[k].filter(function (x) { return x.own; });
+      att[k] = (own.length ? own : att[k]).sort(function (a, b) { return a.t - b.t; });
+    });
+    // 年齢区分のまとまり（基準が同じ連続した年齢をまとめて計算：0歳／1・2歳／3歳／4・5歳）
+    var ageGroups = [];
+    for (var ag = 0; ag <= 5; ag++) {
+      var last = ageGroups[ageGroups.length - 1];
+      if (last && last.ratio === ratio[ag]) last.ages.push(ag);
+      else ageGroups.push({ ratio: ratio[ag] || 0, ages: [ag] });
+    }
+    var pats = patternsFor(m, facilityId);
+    var patByName = {};
+    pats.forEach(function (p) { patByName[p.name] = p; });
+    return {
+      facility: facility, classes: classes, staff: staff, staffById: staffById, ratio: ratio,
+      attendance: att, ageGroups: ageGroups, patterns: pats, patternByName: patByName,
+      minStaff: num(st.minStaff, 2), tokurei: num(st.tokureiThreshold, 1.4),
+      qualShare: num(st.qualifiedShare, 2 / 3),
+      breakExcluded: bool(facility.breakExcluded, true)
+    };
+  }
+  function rateAt(ctx, dt, t) {
+    var list = ctx.attendance[dt] || ctx.attendance['平日'] || [];
+    var r = 0;
+    for (var i = 0; i < list.length; i++) { if (list[i].t <= t) r = list[i].rate; else break; }
+    return r;
+  }
+  function kidsAt(cls, rate) {
+    var out = [0, 0, 0, 0, 0, 0];
+    for (var a = 0; a <= 5; a++) out[a] = Math.round(num(cls['n' + a], 0) * rate / 100);
+    return out;
+  }
+  function trunc1(x) { return Math.floor(x * 10 + 1e-9) / 10; }
+
+  /** 勤務がこの時刻に「配置として数えられる」場所（クラスID / ''=フリー）。いなければ null */
+  function placeAt(e, t, breakExcluded) {
+    if (t < e.st || t + SLOT > e.en) return null;
+    if (breakExcluded && e.bs !== null && t < e.be && t + SLOT > e.bs) return null;
+    for (var i = 0; i < e.segs.length; i++) {
+      var g = e.segs[i];
+      if (t >= g.f && t + SLOT <= g.t) return g.classId;
+    }
+    return e.classId || '';
+  }
+  function workEntries(ctx, shifts) {
+    var out = [];
+    shifts.forEach(function (s) {
+      var staff = ctx.staffById[s.staffId];
+      if (!staff || !bool(staff.counted, false)) return;
+      if ((s.kind || KIND.WORK) !== KIND.WORK || !hasTimes(s)) return;
+      var st = toMin(s.start), en = toMin(s.end), bs = toMin(s.breakStart), bm = num(s.breakMin, 0);
+      out.push({
+        s: s, staff: staff, qualified: bool(staff.qualified, false),
+        st: st, en: en <= st ? en + 1440 : en,
+        bs: bs !== null && bm > 0 ? bs : null, be: bs !== null && bm > 0 ? bs + bm : null,
+        classId: s.classId || '',
+        segs: parseSegments(s.segments).map(function (g) { return { classId: g.classId, f: toMin(g.from), t: toMin(g.to) }; })
+      });
+    });
+    return out;
+  }
+
+  /**
+   * 1日分の配置チェック
+   * rows[0] = 園全体、rows[1..] = クラス。cells は15分ごと。
+   * status: ok=充足 / warn=要確認 / short=不足 / na=判定なし（合同保育の時間帯など）
+   */
+  function evaluateDay(ctx, iso, dayShifts) {
+    var f = ctx.facility;
+    var closed = closedReason(f, iso);
+    var base = { date: iso, closed: closed, rows: [], issues: [], worst: 'na',
+      counts: { ok: 0, warn: 0, short: 0 }, shortMin: 0, warnMin: 0, times: [] };
+    if (closed) return base;
+    var sat = dow(iso) === 6, dt = sat ? '土曜' : '平日';
+    var open = toMin(sat ? f.satOpen : f.open), close = toMin(sat ? f.satClose : f.close);
+    if (open === null || close === null) return base;
+    var classCheck = !sat || bool(f.satClassCheck, false);
+    var cs = toMin(f.classStart), ce = toMin(f.classEnd);
+    var entries = workEntries(ctx, dayShifts);
+    var times = [];
+    for (var t = open; t < close; t += SLOT) times.push(t);
+    base.times = times;
+    base.open = open; base.close = close; base.sat = sat;
+
+    var allRow = { key: 'all', label: '園全体', cells: [] };
+    var classRows = ctx.classes.map(function (c) { return { key: c.id, label: c.name, color: c.color, cells: [] }; });
+
+    times.forEach(function (t) {
+      var rate = rateAt(ctx, dt, t);
+      // ---- 園全体 ----
+      var kidsAge = [0, 0, 0, 0, 0, 0], kidsTotal = 0;
+      var perClassKids = ctx.classes.map(function (c) {
+        var k = kidsAt(c, rate);
+        for (var a = 0; a <= 5; a++) { kidsAge[a] += k[a]; kidsTotal += k[a]; }
+        return k;
+      });
+      var raw = 0;
+      ctx.ageGroups.forEach(function (g) {
+        var k = 0;
+        g.ages.forEach(function (a) { k += kidsAge[a]; });
+        if (g.ratio) raw += trunc1(k / g.ratio);
+      });
+      raw = Math.round(raw * 10) / 10;
+      var req = kidsTotal > 0 ? Math.max(ctx.minStaff, Math.floor(raw + 0.5 + 1e-9)) : 0;
+      var n = 0, q = 0;
+      var byClass = {};
+      entries.forEach(function (e) {
+        var p = placeAt(e, t, ctx.breakExcluded);
+        if (p === null) return;
+        n++; if (e.qualified) q++;
+        var b = byClass[p] || (byClass[p] = { n: 0, q: 0 });
+        b.n++; if (e.qualified) b.q++;
+      });
+      var st, why = '';
+      if (req === 0) st = 'na';
+      else if (n < req) { st = 'short'; why = 'count'; }
+      else if (q >= req) st = 'ok';
+      else if (raw <= ctx.tokurei && q >= 1) { st = 'warn'; why = 'tokurei'; }
+      else if (q >= Math.ceil(req * ctx.qualShare - 1e-9)) { st = 'warn'; why = 'qual'; }
+      else { st = 'short'; why = 'qualShort'; }
+      allRow.cells.push({ t: t, kids: kidsTotal, req: req, raw: raw, n: n, q: q, st: st, why: why });
+
+      // ---- クラス ----
+      ctx.classes.forEach(function (c, i) {
+        var cell;
+        if (!classCheck || cs === null || ce === null || t < cs || t >= ce) {
+          cell = { t: t, kids: sum(perClassKids[i]), req: 0, n: (byClass[c.id] || {}).n || 0, q: (byClass[c.id] || {}).q || 0, st: 'na', why: 'joint' };
+        } else {
+          var k = perClassKids[i], need = 0, kt = 0;
+          for (var a2 = 0; a2 <= 5; a2++) { kt += k[a2]; if (ctx.ratio[a2]) need += k[a2] / ctx.ratio[a2]; }
+          var r2 = kt > 0 ? Math.max(1, Math.ceil(need - 1e-9)) : 0;
+          var b2 = byClass[c.id] || { n: 0, q: 0 };
+          var s2, w2 = '';
+          if (r2 === 0) s2 = 'na';
+          else if (b2.n < r2) { s2 = 'short'; w2 = 'count'; }
+          else if (b2.q < r2) { s2 = 'warn'; w2 = 'qual'; }
+          else s2 = 'ok';
+          cell = { t: t, kids: kt, req: r2, n: b2.n, q: b2.q, st: s2, why: w2 };
+        }
+        classRows[i].cells.push(cell);
+      });
+    });
+
+    base.rows = [allRow].concat(classRows);
+    var rank = { na: 0, ok: 1, warn: 2, short: 3 };
+    var worst = 'na';
+    base.rows.forEach(function (row) {
+      row.worst = 'na'; row.shortMin = 0; row.warnMin = 0;
+      row.cells.forEach(function (c) {
+        if (c.st === 'na') return;
+        base.counts[c.st]++;
+        if (rank[c.st] > rank[row.worst]) row.worst = c.st;
+        if (c.st === 'short') row.shortMin += SLOT;
+        if (c.st === 'warn') row.warnMin += SLOT;
+      });
+      if (rank[row.worst] > rank[worst]) worst = row.worst;
+      base.shortMin += row.shortMin; base.warnMin += row.warnMin;
+      base.issues = base.issues.concat(rowIssues(row, iso));
+    });
+    base.worst = worst;
+    base.idleStaff = entries.filter(function (e) { return !e.classId; }).length;
+    return base;
+  }
+  function sum(arr) { var s = 0; for (var i = 0; i < arr.length; i++) s += arr[i]; return s; }
+
+  var WHY_TEXT = {
+    count: '人数不足',
+    qual: '有資格者が基準人数に満たない（補助者を含めて充足）',
+    tokurei: '朝夕特例の範囲（2名のうち1名が有資格者）',
+    qualShort: '有資格者が必要数の3分の2未満'
+  };
+  function rowIssues(row, iso) {
+    var out = [], cur = null;
+    row.cells.forEach(function (c) {
+      var bad = c.st === 'short' || c.st === 'warn';
+      if (cur && (!bad || c.st !== cur.status || c.why !== cur.why)) { out.push(cur); cur = null; }
+      if (!bad) return;
+      if (!cur) {
+        cur = { date: iso, rowKey: row.key, label: row.label, status: c.st, why: c.why,
+          from: c.t, to: c.t + SLOT, req: c.req, n: c.n, q: c.q, shortBy: Math.max(0, c.req - c.n) };
+      } else {
+        cur.to = c.t + SLOT;
+        cur.req = Math.max(cur.req, c.req);
+        cur.n = Math.min(cur.n, c.n);
+        cur.q = Math.min(cur.q, c.q);
+        cur.shortBy = Math.max(cur.shortBy, c.req - c.n);
+      }
+    });
+    if (cur) out.push(cur);
+    out.forEach(function (x) {
+      x.fromText = fromMin(x.from); x.toText = fromMin(x.to);
+      if (x.status === 'short' && x.why === 'count') {
+        x.message = x.label + ' ' + x.fromText + '〜' + x.toText + ' ' + x.shortBy + '名不足（必要' + x.req + '・配置' + x.n + '）';
+      } else if (x.status === 'short') {
+        x.message = x.label + ' ' + x.fromText + '〜' + x.toText + ' 有資格者不足（必要' + x.req + '・うち有資格' + x.q + '）';
+      } else {
+        x.message = x.label + ' ' + x.fromText + '〜' + x.toText + ' 要確認：' + WHY_TEXT[x.why] + '（必要' + x.req + '・配置' + x.n + '・有資格' + x.q + '）';
+      }
+    });
+    return out;
+  }
+
+  /** 複数日の判定をまとめる（本部画面・月表示用） */
+  function evaluateRange(ctx, from, to, shifts) {
+    var byDate = {};
+    shifts.forEach(function (s) { (byDate[s.date] || (byDate[s.date] = [])).push(s); });
+    return dateRange(from, to).map(function (d) { return evaluateDay(ctx, d, byDate[d] || []); });
+  }
+
+  /** 職員ごとの集計（労務・給与用） */
+  function staffSummary(ctx, shifts) {
+    var by = {};
+    ctx.staff.forEach(function (s) {
+      by[s.id] = { staffId: s.id, name: s.name, job: s.job, employment: s.employment,
+        days: 0, satDays: 0, off: 0, paid: 0, train: 0, workMin: 0, spanMin: 0, fixedWorkMin: 0, unfixed: 0, warnings: 0 };
+    });
+    shifts.forEach(function (s) {
+      var r = by[s.staffId];
+      if (!r) return;
+      var kind = s.kind || KIND.WORK;
+      if (s.status !== STATUS.FIXED) r.unfixed++;
+      if (kind === KIND.PAID) { r.paid++; return; }
+      if (kind === KIND.OFF) { r.off++; return; }
+      if (!hasTimes(s)) return;
+      var h = calcHours(s);
+      if (kind === KIND.TRAIN) r.train++;
+      r.days++;
+      if (dow(s.date) === 6) r.satDays++;
+      r.workMin += h.workMin; r.spanMin += h.spanMin;
+      if (s.status === STATUS.FIXED) r.fixedWorkMin += h.workMin;
+      if (laborWarnings(s).length) r.warnings++;
+    });
+    return ctx.staff.map(function (s) { return by[s.id]; });
+  }
+
+  // ------------------------------------------------------------------
+  // デモデータ（決まった乱数で毎回同じ内容を作る）
+  // ------------------------------------------------------------------
+  var Demo = (function () {
+    function rng(seed) {
+      var a = seed >>> 0;
+      return function () {
+        a = (a + 0x6D2B79F5) >>> 0;
+        var t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    function hash(str) { var h = 2166136261; for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+
+    var BASIS = '児童福祉施設の設備及び運営に関する基準 第33条／幼保連携型認定こども園の学級の編制、職員、設備及び運営に関する基準 第5条';
+    var RULES = [
+      { age: 0, label: '0歳児', perStaff: 3, basis: BASIS, note: '乳児おおむね3人につき1人' },
+      { age: 1, label: '1歳児', perStaff: 6, basis: BASIS, note: '1歳児配置改善加算（令和7年度〜）を取得し5:1で運用する場合は 5 に変更' },
+      { age: 2, label: '2歳児', perStaff: 6, basis: BASIS, note: '満1歳以上満3歳未満 おおむね6人につき1人' },
+      { age: 3, label: '3歳児', perStaff: 15, basis: BASIS, note: '令和6年4月改正で20:1→15:1（経過措置で当分の間20:1も可）' },
+      { age: 4, label: '4歳児', perStaff: 25, basis: BASIS, note: '令和6年4月改正で30:1→25:1（経過措置で当分の間30:1も可）' },
+      { age: 5, label: '5歳児', perStaff: 25, basis: BASIS, note: '令和6年4月改正で30:1→25:1（経過措置で当分の間30:1も可）' }
+    ];
+    var SETTINGS = [
+      { key: 'orgName', value: 'すこやか福祉会', note: '法人名（画面の見出しに表示）' },
+      { key: 'demoMode', value: true, note: 'TRUE の間はログイン画面にデモ用の暗証番号を表示します。本番運用では FALSE に。' },
+      { key: 'hqLoginRequired', value: false, note: 'TRUE にすると本部画面の閲覧に本部アカウントでのログインが必要になります' },
+      { key: 'minStaff', value: 2, note: '開所中は常時この人数以上（保育所一につき2人を下回らない）' },
+      { key: 'tokureiThreshold', value: 1.4, note: '年齢別の必要数合計がこの値以下の時間帯は「朝夕特例」（2名のうち1名を子育て支援員等で代替可）として要確認扱い' },
+      { key: 'qualifiedShare', value: 0.667, note: '有資格者が必要数のこの割合以上なら「要確認」、未満なら「不足」' },
+      { key: 'autoRefreshSec', value: 180, note: '画面の自動更新間隔（秒）。0 で自動更新しない' }
+    ];
+    var COMMON_PATTERNS = [
+      ['P01', '早番', '早', '07:00', '15:45', 45, '勤務', '#FDE5CF', '#D9722B'],
+      ['P02', '早出', '早出', '07:30', '16:15', 45, '勤務', '#FCEFC2', '#B98A0E'],
+      ['P03', '日勤', '日', '08:30', '17:15', 45, '勤務', '#E2F1DC', '#4E9441'],
+      ['P04', '中番', '中', '09:00', '17:45', 45, '勤務', '#D9EFEA', '#2F8C7C'],
+      ['P05', '遅出', '遅出', '09:45', '18:30', 45, '勤務', '#E1E7F8', '#4C68C0'],
+      ['P06', '遅番', '遅', '10:15', '19:00', 45, '勤務', '#EAE0F5', '#7E50B8'],
+      ['P07', '土遅', '土遅', '09:15', '18:00', 45, '勤務', '#E1E7F8', '#3F5DAE'],
+      ['P08', '短時間', '短', '09:00', '15:00', 0, '勤務', '#FBE2EC', '#C04B7E'],
+      ['P09', '研修', '研', '09:00', '17:00', 60, '研修', '#E6ECF0', '#5E7684'],
+      ['P10', '休み', '休', '', '', 0, '休み', '#FFFFFF', '#B5ACA1'],
+      ['P11', '有休', '有', '', '', 0, '有休', '#FFF6DD', '#C9962A'],
+      ['P12', '振休', '振', '', '', 0, '休み', '#F5F1EB', '#9A8F82']
+    ];
+    var E03_PATTERNS = [
+      ['P31', '早番', '早', '07:30', '16:15', 45, '勤務', '#FDE5CF', '#D9722B'],
+      ['P32', '早出', '早出', '08:00', '16:45', 45, '勤務', '#FCEFC2', '#B98A0E'],
+      ['P35', '遅出', '遅出', '09:15', '18:00', 45, '勤務', '#E1E7F8', '#4C68C0'],
+      ['P36', '遅番', '遅', '09:45', '18:30', 45, '勤務', '#EAE0F5', '#7E50B8'],
+      ['P37', '土遅', '土遅', '08:45', '17:30', 45, '勤務', '#E1E7F8', '#3F5DAE']
+    ];
+
+    // 園の設定（職員はすべて架空の人物です）
+    var FACILITIES = [
+      {
+        f: { id: 'E01', name: 'さくらこども園', kind: '幼保連携型認定こども園', open: '07:00', close: '19:00', satOpen: '07:00', satClose: '18:00', classStart: '09:00', classEnd: '16:00', satClassCheck: false, breakExcluded: true, closedDates: '', order: 1 },
+        classes: [
+          ['c01', 'ひよこ組', '0歳', [9, 0, 0, 0, 0, 0], '#F6A5A5'],
+          ['c02', 'りす組', '1歳', [0, 12, 0, 0, 0, 0], '#F5C07A'],
+          ['c03', 'うさぎ組', '2歳', [0, 0, 18, 0, 0, 0], '#E6D46A'],
+          ['c04', 'ぱんだ組', '3歳', [0, 0, 0, 21, 0, 0], '#9CCB86'],
+          ['c05', 'きりん組', '4歳', [0, 0, 0, 0, 24, 0], '#7FC1C9'],
+          ['c06', 'ぞう組', '5歳', [0, 0, 0, 0, 0, 25], '#A3A8E0']
+        ],
+        // [名前, 職種, 資格, 有資格, 保育従事, 雇用, クラス, 役割, 固定勤務(パート等)]
+        staff: [
+          ['森田 恵子', '園長', '保育教諭', true, false, '常勤', '', 'head', ['08:30', '17:15', 45]],
+          ['佐藤 由美', '主任保育教諭', '保育教諭', true, true, '常勤', '', 'chief', null],
+          ['高橋 美咲', '保育教諭', '保育教諭', true, true, '常勤', 'c01', 'rot', null],
+          ['田中 結衣', '保育教諭', '保育教諭', true, true, '常勤', 'c01', 'rot', null],
+          ['伊藤 早紀', '保育教諭', '保育教諭', true, true, '常勤', 'c01', 'rot', null],
+          ['渡辺 千尋', '保育士（パート）', '保育士', true, true, 'パート', 'c01', 'pt', ['09:00', '15:00', 0, '12345']],
+          ['山本 彩花', '保育教諭', '保育教諭', true, true, '常勤', 'c02', 'rot', null],
+          ['中村 真由', '保育教諭', '保育教諭', true, true, '常勤', 'c02', 'rot', null],
+          ['小林 京子', '保育士（パート）', '保育士', true, true, 'パート', 'c02', 'pt', ['09:00', '15:00', 0, '12345']],
+          ['加藤 陽菜', '保育教諭', '保育教諭', true, true, '常勤', 'c03', 'rot', null],
+          ['吉田 麻衣', '保育教諭', '保育教諭', true, true, '常勤', 'c03', 'rot', null],
+          ['山田 恵美', '保育教諭', '保育教諭', true, true, '常勤', 'c03', 'rot', null],
+          ['佐々木 香織', '保育士（パート）', '保育士', true, true, 'パート', 'c03', 'pt', ['09:30', '15:30', 0, '1235']],
+          ['山口 翔太', '保育教諭', '保育教諭', true, true, '常勤', 'c04', 'rot', null],
+          ['松本 愛', '保育教諭', '保育教諭', true, true, '常勤', 'c04', 'rot', null],
+          ['井上 幸子', '保育補助（パート）', 'なし', false, true, 'パート', 'c04', 'pt', ['10:00', '16:00', 0, '1234']],
+          ['木村 優子', '保育教諭', '保育教諭', true, true, '常勤', 'c05', 'rot', null],
+          ['林 久美子', '保育士（パート）', '保育士', true, true, 'パート', 'c05', 'pt', ['13:00', '19:00', 0, '1234']],
+          ['清水 大輔', '保育教諭', '保育教諭', true, true, '常勤', 'c06', 'rot', null],
+          ['山崎 明日香', '保育教諭', '保育教諭', true, true, '常勤', 'c06', 'rot', null],
+          ['森 さやか', '保育教諭（フリー）', '保育教諭', true, true, '常勤', '', 'rot', null],
+          ['池田 奈々', '保育教諭（フリー）', '保育教諭', true, true, '常勤', '', 'rot', null],
+          ['橋本 典子', '看護師', '看護師', true, true, '常勤', '', 'nurse', ['08:30', '17:15', 45]],
+          ['阿部 順子', '栄養士', '栄養士', false, false, '常勤', '', 'fixed', ['08:30', '17:15', 45, '12345']],
+          ['石川 正樹', '調理員', 'なし', false, false, '常勤', '', 'fixed', ['08:00', '16:45', 45, '12345']],
+          ['前田 和子', '調理員（パート）', 'なし', false, false, 'パート', '', 'fixed', ['10:00', '14:00', 0, '12345']],
+          ['藤田 美穂', '事務員（パート）', 'なし', false, false, 'パート', '', 'fixed', ['09:00', '15:00', 0, '135']]
+        ],
+        weekday: ['早番', '早番', '早出', '早出', '早出', '遅番', '遅番', '遅出', '遅出', '中番'],
+        saturday: [['早番', '早番', '日勤', '土遅', '土遅'], ['早番', '早番', '日勤', '土遅', '土遅']],
+        trouble: 0.10, leaveRate: 0.045,
+        att: {
+          '平日': [['07:00', 10], ['07:30', 22], ['08:00', 45], ['08:30', 75], ['09:00', 95], ['09:30', 100], ['16:00', 90], ['16:30', 75], ['17:00', 55], ['17:30', 38], ['18:00', 22], ['18:30', 10]],
+          '土曜': [['07:00', 5], ['07:30', 10], ['08:00', 18], ['08:30', 25], ['09:00', 28], ['16:00', 24], ['16:30', 18], ['17:00', 12], ['17:30', 6]]
+        },
+        accounts: [['e01-head', '園長', 'head', '1111'], ['e01-chief', '主任', 'chief', '1112']]
+      },
+      {
+        f: { id: 'E02', name: 'ひまわり保育園', kind: '保育所', open: '07:00', close: '19:00', satOpen: '07:00', satClose: '18:00', classStart: '09:30', classEnd: '16:00', satClassCheck: false, breakExcluded: true, closedDates: '', order: 2 },
+        classes: [
+          ['c11', 'つぼみ組', '0歳', [6, 0, 0, 0, 0, 0], '#F6A5A5'],
+          ['c12', 'めばえ組', '1歳', [0, 10, 0, 0, 0, 0], '#F5C07A'],
+          ['c13', 'わかば組', '2歳', [0, 0, 12, 0, 0, 0], '#E6D46A'],
+          ['c14', 'ふたば組', '3歳', [0, 0, 0, 18, 0, 0], '#9CCB86'],
+          ['c15', 'はな組', '4歳', [0, 0, 0, 0, 20, 0], '#7FC1C9'],
+          ['c16', 'そら組', '5歳', [0, 0, 0, 0, 0, 22], '#A3A8E0']
+        ],
+        staff: [
+          ['岡本 洋子', '園長', '保育士', true, false, '常勤', '', 'head', ['08:30', '17:15', 45]],
+          ['松田 美香', '主任保育士', '保育士', true, true, '常勤', '', 'chief', null],
+          ['中川 理恵', '保育士', '保育士', true, true, '常勤', 'c11', 'rot', null],
+          ['原田 綾', '保育士', '保育士', true, true, '常勤', 'c11', 'rot', null],
+          ['小川 楓', '保育士（パート）', '保育士', true, true, 'パート', 'c11', 'pt', ['09:00', '15:00', 0, '12345']],
+          ['竹内 杏奈', '保育士', '保育士', true, true, '常勤', 'c12', 'rot', null],
+          ['金子 由紀', '保育士', '保育士', true, true, '常勤', 'c12', 'rot', null],
+          ['和田 純子', '保育補助（パート）', 'なし', false, true, 'パート', 'c12', 'pt', ['09:00', '14:00', 0, '1245']],
+          ['中山 優花', '保育士', '保育士', true, true, '常勤', 'c13', 'rot', null],
+          ['石田 里奈', '保育士', '保育士', true, true, '常勤', 'c13', 'rot', null],
+          ['上田 千夏', '保育士（パート）', '保育士', true, true, 'パート', 'c13', 'pt', ['09:30', '15:30', 0, '12345']],
+          ['森本 沙織', '保育士', '保育士', true, true, '常勤', 'c14', 'rot', null],
+          ['原 美穂', '保育士', '保育士', true, true, '常勤', 'c14', 'rot', null],
+          ['柴田 真理', '保育士', '保育士', true, true, '常勤', 'c15', 'rot', null],
+          ['酒井 舞', '保育士', '保育士', true, true, '常勤', 'c16', 'rot', null],
+          ['工藤 恵子', '保育補助（パート）', 'なし', false, true, 'パート', 'c16', 'pt', ['13:00', '19:00', 0, '12345']],
+          ['横山 聡', '保育士（フリー）', '保育士', true, true, '常勤', '', 'rot', null],
+          ['吉村 智美', '保育士（パート・フリー）', '保育士', true, true, 'パート', '', 'pt', ['09:30', '15:30', 0, '12345']],
+          ['大西 恵', '保育士（パート・夕方）', '保育士', true, true, 'パート', '', 'pt', ['15:00', '19:00', 0, '12345']],
+          ['宮崎 香', '調理員', 'なし', false, false, '常勤', '', 'fixed', ['08:00', '16:45', 45, '12345']],
+          ['宮本 弘子', '調理員（パート）', 'なし', false, false, 'パート', '', 'fixed', ['10:00', '14:00', 0, '12345']]
+        ],
+        weekday: ['早番', '早番', '早出', '早出', '遅番', '遅番', '遅出'],
+        saturday: [['早番', '早番', '土遅', '土遅'], ['早番', '早出', '日勤', '土遅']],
+        trouble: 0.22, leaveRate: 0.06,
+        att: {
+          '平日': [['07:00', 10], ['07:30', 22], ['08:00', 45], ['08:30', 70], ['09:00', 95], ['09:30', 100], ['16:00', 85], ['16:30', 70], ['17:00', 50], ['17:30', 38], ['18:00', 22], ['18:30', 10]],
+          '土曜': [['07:00', 6], ['07:30', 12], ['08:00', 18], ['08:30', 24], ['09:00', 25], ['16:00', 22], ['16:30', 18], ['17:00', 12], ['17:30', 6]]
+        },
+        accounts: [['e02-head', '園長', 'head', '2221'], ['e02-chief', '主任', 'chief', '2222']]
+      },
+      {
+        f: { id: 'E03', name: 'たんぽぽ保育園', kind: '保育所', open: '07:30', close: '18:30', satOpen: '07:30', satClose: '17:30', classStart: '09:30', classEnd: '15:30', satClassCheck: false, breakExcluded: true, closedDates: '', order: 3 },
+        classes: [
+          ['c21', 'ちょうちょ組', '0・1歳', [3, 6, 0, 0, 0, 0], '#F6A5A5'],
+          ['c22', 'ことり組', '2歳', [0, 0, 10, 0, 0, 0], '#E6D46A'],
+          ['c23', 'ほし組', '3〜5歳', [0, 0, 0, 8, 9, 9], '#7FC1C9']
+        ],
+        staff: [
+          ['青木 智子', '園長', '保育士', true, false, '常勤', '', 'head', ['08:30', '17:15', 45]],
+          ['坂本 直美', '主任保育士', '保育士', true, true, '常勤', '', 'chief', null],
+          ['福田 由香', '保育士', '保育士', true, true, '常勤', 'c21', 'rot', null],
+          ['太田 愛子', '保育士', '保育士', true, true, '常勤', 'c21', 'rot', null],
+          ['西村 美和', '子育て支援員（パート）', '子育て支援員', false, true, 'パート', 'c21', 'pt', ['09:00', '15:00', 0, '12345']],
+          ['藤井 遥', '保育士', '保育士', true, true, '常勤', 'c22', 'rot', null],
+          ['岡田 美紀', '保育士（パート）', '保育士', true, true, 'パート', 'c22', 'pt', ['09:00', '15:00', 0, '12345']],
+          ['後藤 茜', '保育士', '保育士', true, true, '常勤', 'c23', 'rot', null],
+          ['長谷川 薫', '保育補助（パート）', 'なし', false, true, 'パート', 'c23', 'pt', ['09:30', '15:30', 0, '12345']],
+          ['村上 恵', '保育士（フリー）', '保育士', true, true, '常勤', '', 'rot', null],
+          ['松井 文子', '保育士（パート・フリー）', '保育士', true, true, 'パート', '', 'pt', ['10:00', '16:00', 0, '12345']],
+          ['近藤 陽子', '子育て支援員（パート）', '子育て支援員', false, true, 'パート', '', 'pt', ['07:30', '11:30', 0, '123456']],
+          ['石井 里美', '子育て支援員（パート）', '子育て支援員', false, true, 'パート', '', 'pt', ['14:30', '18:30', 0, '12345']],
+          ['遠藤 久美', '調理員', 'なし', false, false, '常勤', '', 'fixed', ['08:30', '17:15', 45, '12345']],
+          ['中島 舞', '調理員（パート）', 'なし', false, false, 'パート', '', 'fixed', ['10:00', '14:00', 0, '12345']]
+        ],
+        weekday: ['早番', '早出', '遅番', '中番'],
+        saturday: [['早番', '日勤', '土遅'], ['早番', '日勤', '土遅']],
+        trouble: 0.25, leaveRate: 0.04,
+        att: {
+          '平日': [['07:30', 15], ['08:00', 40], ['08:30', 70], ['09:00', 95], ['09:30', 100], ['15:30', 85], ['16:00', 70], ['16:30', 50], ['17:00', 32], ['17:30', 18], ['18:00', 8]],
+          '土曜': [['07:30', 8], ['08:00', 15], ['08:30', 22], ['09:00', 26], ['15:30', 20], ['16:00', 14], ['16:30', 8], ['17:00', 4]]
+        },
+        accounts: [['e03-head', '園長', 'head', '3331']]
+      }
+    ];
+
+    function makeShift(fid, fname, staff, date, pat, extra) {
+      var s = {
+        id: date + '_' + staff.id, facilityId: fid, facilityName: fname, date: date, dow: DOW[dow(date)],
+        staffId: staff.id, staffName: staff.name, type: pat.name, kind: pat.kind,
+        start: pat.start || '', end: pat.end || '', breakStart: '', breakMin: pat.kind === KIND.WORK || pat.kind === KIND.TRAIN ? (pat.breakMin || 0) : 0,
+        classId: staff.classId || '', segments: '', status: STATUS.FIXED, editor: '', editedAt: '', approver: '', approvedAt: '', prevFixed: '', note: ''
+      };
+      if (extra) for (var k in extra) s[k] = extra[k];
+      return s;
+    }
+
+    function build(todayISO) {
+      var today = todayISO || todayJST();
+      var from = addMonths(monthStart(today), -1);
+      var to = monthEnd(addMonths(monthStart(today), 1));
+      var m = { facilities: [], classes: [], staff: [], patterns: [], rules: RULES.slice(), attendance: [], settings: SETTINGS.slice(), accounts: [], shifts: [] };
+      COMMON_PATTERNS.forEach(function (p, i) {
+        m.patterns.push({ id: p[0], facilityId: '', name: p[1], short: p[2], start: p[3], end: p[4], breakMin: p[5], kind: p[6], bg: p[7], bar: p[8], order: i + 1 });
+      });
+      E03_PATTERNS.forEach(function (p) {
+        var base = COMMON_PATTERNS.filter(function (c) { return c[1] === p[1]; })[0];
+        var ord = COMMON_PATTERNS.indexOf(base) + 1;
+        m.patterns.push({ id: p[0], facilityId: 'E03', name: p[1], short: p[2], start: p[3], end: p[4], breakMin: p[5], kind: p[6], bg: p[7], bar: p[8], order: ord });
+      });
+      m.accounts.push({ id: 'hq', name: '本部 管理者', role: '本部', facilityId: '', email: '', pin: '0000' });
+
+      FACILITIES.forEach(function (F) {
+        var f = F.f;
+        m.facilities.push(f);
+        F.classes.forEach(function (c, i) {
+          m.classes.push({ id: c[0], facilityId: f.id, name: c[1], ages: c[2], n0: c[3][0], n1: c[3][1], n2: c[3][2], n3: c[3][3], n4: c[3][4], n5: c[3][5], order: i + 1, color: c[4] });
+        });
+        var staff = F.staff.map(function (s, i) {
+          var o = { id: f.id + '-' + pad2(i + 1), facilityId: f.id, name: s[0], job: s[1], license: s[2], qualified: s[3], counted: s[4], employment: s[5], classId: s[6], weeklyHours: s[5] === '常勤' ? 40 : 0, order: i + 1, active: true };
+          if (s[8] && s[5] !== '常勤') {
+            var d = s[8], cnt = String(d[3] || '12345').length;
+            o.weeklyHours = Math.round(((toMin(d[1]) - toMin(d[0]) - d[2]) / 60) * cnt * 10) / 10;
+          }
+          return { rec: o, role: s[7], fixed: s[8] };
+        });
+        staff.forEach(function (s) { m.staff.push(s.rec); });
+        Object.keys(F.att).forEach(function (dt) {
+          F.att[dt].forEach(function (a) { m.attendance.push({ facilityId: f.id, dayType: dt, time: a[0], rate: a[1] }); });
+        });
+        F.accounts.forEach(function (a) {
+          var who = staff.filter(function (s) { return s.role === a[2]; })[0];
+          m.accounts.push({ id: a[0], name: (who ? who.rec.name : '') + '（' + a[1] + '）', role: a[1], facilityId: f.id, email: '', pin: a[3] });
+        });
+        genFacility(m, F, staff, from, to, today);
+      });
+      return m;
+    }
+
+    function genFacility(m, F, staff, from, to, today) {
+      var f = F.f;
+      var R = rng(hash(f.id + from));
+      var ctx = buildContext(m, f.id);
+      var pat = ctx.patternByName;
+      var head = staff.filter(function (s) { return s.role === 'head'; })[0];
+      var headName = head ? head.rec.name : '';
+      var rot = staff.filter(function (s) { return s.role === 'rot'; });
+      // クラスが偏らないよう、クラスごとに交互に並べる
+      var groups = {};
+      var gorder = [];
+      rot.forEach(function (s) {
+        var k = s.rec.classId || 'free';
+        if (!groups[k]) { groups[k] = []; gorder.push(k); }
+        groups[k].push(s);
+      });
+      var inter = [];
+      for (var r = 0; r < 5; r++) gorder.forEach(function (k) { if (groups[k][r]) inter.push(groups[k][r]); });
+      var chief = staff.filter(function (s) { return s.role === 'chief'; })[0];
+      var satPool = inter.concat(chief ? [chief] : []);
+      var satIdx = 0;
+      var out = [];
+      var days = dateRange(from, to);
+      var weeks = {};
+      days.forEach(function (d) { var w = weekStart(d); (weeks[w] || (weeks[w] = [])).push(d); });
+      var weekKeys = Object.keys(weeks).sort();
+
+      weekKeys.forEach(function (wk, wi) {
+        var wdays = dateRange(wk, addDays(wk, 6));
+        var sat = addDays(wk, 5);
+        var satOpen = !closedReason(f, sat);
+        var satWorkers = [];
+        var satPlan = F.saturday[wi % F.saturday.length];
+        if (satOpen) {
+          for (var i = 0; i < satPlan.length; i++) { satWorkers.push(satPool[satIdx % satPool.length]); satIdx++; }
+        }
+        // 振休（土曜出勤者は同じ週の平日に1日休み）
+        var furi = {};
+        var openWeekdays = wdays.slice(0, 5).filter(function (d) { return !closedReason(f, d); });
+        satWorkers.forEach(function (s, i) {
+          if (!openWeekdays.length) return;
+          var d = openWeekdays[(i + wi) % openWeekdays.length];
+          furi[s.rec.id] = d;
+        });
+        wdays.forEach(function (d, di) {
+          if (d < from || d > to) return;
+          var closed = closedReason(f, d);
+          var isSat = dow(d) === 6;
+          var dayShifts = [];
+          var trouble = R() < F.trouble;
+          var used = {};
+          var put = function (s, p, extra) { used[s.rec.id] = true; dayShifts.push(makeShift(f.id, f.name, s.rec, d, p, extra)); };
+          if (closed) return;
+          if (isSat) {
+            satWorkers.forEach(function (s, i) { put(s, pat[satPlan[i]]); });
+            staff.forEach(function (s) {
+              if (used[s.rec.id]) return;
+              if (s.fixed && String(s.fixed[3] || '').indexOf('6') >= 0) {
+                put(s, pat['短時間'], { type: '短時間', start: s.fixed[0], end: s.fixed[1], breakMin: s.fixed[2] });
+              }
+            });
+          } else {
+            var wd = String(dow(d));
+            // 有休・研修
+            var avail = [];
+            inter.forEach(function (s) {
+              if (furi[s.rec.id] === d) { put(s, pat['振休']); return; }
+              var x = R();
+              if (x < F.leaveRate) { put(s, pat['有休'], { note: '' }); return; }
+              if (x < F.leaveRate + 0.012) { put(s, pat['研修'], { note: '園外研修' }); return; }
+              avail.push(s);
+            });
+            // ローテーション
+            var shiftBy = (wi * 5 + di) * 3;
+            var order = avail.map(function (s, i) { return { s: s, k: (inter.indexOf(s) + shiftBy) % inter.length }; })
+              .sort(function (a, b) { return a.k - b.k; }).map(function (x) { return x.s; });
+            order.forEach(function (s, i) {
+              var name = F.weekday[i] || '日勤';
+              put(s, pat[name]);
+            });
+            staff.forEach(function (s) {
+              if (used[s.rec.id]) return;
+              if (s.role === 'chief') {
+                if (furi[s.rec.id] === d) put(s, pat['振休']);
+                else put(s, pat['日勤']);
+                return;
+              }
+              if (!s.fixed) return;
+              var days = String(s.fixed[3] || '12345');
+              if (days.indexOf(wd) < 0) { if (s.rec.employment === '常勤') put(s, pat['休み']); return; }
+              if (s.role === 'pt' || s.role === 'fixed') {
+                if (R() < F.leaveRate * 0.8) { put(s, pat['有休']); return; }
+              }
+              var pname = s.rec.employment === '常勤' ? '日勤' : '短時間';
+              put(s, pat[pname], { start: s.fixed[0], end: s.fixed[1], breakMin: s.fixed[2] });
+            });
+          }
+          // 公休（常勤で勤務なしの日）
+          staff.forEach(function (s) {
+            if (used[s.rec.id]) return;
+            if (s.rec.employment === '常勤') put(s, pat['休み']);
+          });
+          assignBreaks(ctx, dayShifts);
+          if (!trouble) repair(ctx, d, dayShifts, R);
+          else repairPartly(ctx, d, dayShifts, R);
+          out = out.concat(dayShifts);
+        });
+      });
+      applyStatuses(f, out, staff, headName, today, R);
+      m.shifts = m.shifts.concat(out);
+    }
+
+    // 休憩：同じクラスで重ならず、園全体でも同じ時間に集中しないように割り振る
+    function assignBreaks(ctx, dayShifts) {
+      var list = dayShifts.filter(function (s) { return s.kind === KIND.WORK && Number(s.breakMin) > 0 && hasTimes(s); })
+        .sort(function (a, b) { return toMin(a.start) - toMin(b.start); });
+      var conc = {}, classBusy = {};
+      list.forEach(function (s) {
+        var st = toMin(s.start), en = toMin(s.end), bm = Number(s.breakMin);
+        var staff = ctx.staffById[s.staffId] || {};
+        var counted = bool(staff.counted, false);
+        var lo = Math.max(st + 180, 11 * 60 + 30), hi = Math.min(en - 60 - bm, 15 * 60 - bm);
+        if (hi < lo) { lo = st + Math.floor((en - st - bm) / 30) * 15; hi = lo; }
+        var best = lo, bestScore = Infinity;
+        for (var b = lo; b <= hi; b += 15) {
+          var score = Math.abs(b - 13 * 60) / 600;
+          if (counted) {
+            var busy = classBusy[s.classId || ''] || [];
+            for (var i = 0; i < busy.length; i++) if (s.classId && b < busy[i][1] && b + bm > busy[i][0]) score += 1000;
+            for (var t = b; t < b + bm; t += 15) score += (conc[t] || 0);
+          }
+          if (score < bestScore) { bestScore = score; best = b; }
+        }
+        s.breakStart = fromMin(best);
+        if (counted) {
+          for (var t2 = best; t2 < best + bm; t2 += 15) conc[t2] = (conc[t2] || 0) + 1;
+          (classBusy[s.classId || ''] || (classBusy[s.classId || ''] = [])).push([best, best + bm]);
+        }
+      });
+    }
+
+    // フリー職員を、足りないクラスへ時間帯で割り当てる（部分的にでも埋める）
+    function freeRanges(s, from, to) {
+      var a = Math.max(from, toMin(s.start)), b = Math.min(to, toMin(s.end));
+      if (a >= b) return [];
+      var blocks = [];
+      var bs = toMin(s.breakStart);
+      if (bs !== null && Number(s.breakMin) > 0) blocks.push([bs, bs + Number(s.breakMin)]);
+      parseSegments(s.segments).forEach(function (g) { blocks.push([toMin(g.from), toMin(g.to)]); });
+      var out = [], cur = a;
+      blocks.sort(function (x, y) { return x[0] - y[0]; }).forEach(function (bk) {
+        if (bk[1] <= cur || bk[0] >= b) return;
+        if (bk[0] > cur) out.push([cur, Math.min(bk[0], b)]);
+        cur = Math.max(cur, bk[1]);
+      });
+      if (cur < b) out.push([cur, b]);
+      return out;
+    }
+    function repair(ctx, d, dayShifts, R, limit) {
+      var maxFix = limit === undefined ? 99 : limit;
+      var skip = {};
+      for (var tries = 0; tries < 60 && maxFix > 0; tries++) {
+        var res = evaluateDay(ctx, d, dayShifts);
+        var issue = res.issues.filter(function (x) { return x.rowKey !== 'all' && !skip[x.rowKey + '@' + x.from + x.status]; })[0];
+        if (!issue) return;
+        var best = null;
+        dayShifts.forEach(function (s) {
+          var st = ctx.staffById[s.staffId];
+          if (!st || st.classId || !bool(st.counted, false) || s.kind !== KIND.WORK || !hasTimes(s)) return;
+          var q = bool(st.qualified, false);
+          if (issue.status === 'warn' && !q) return;
+          freeRanges(s, issue.from, issue.to).forEach(function (rg) {
+            var score = (rg[1] - rg[0]) + (q ? 30 : 0) + R();
+            if (!best || score > best.score) best = { s: s, rg: rg, score: score };
+          });
+        });
+        if (!best) { skip[issue.rowKey + '@' + issue.from + issue.status] = true; continue; }
+        var segs = parseSegments(best.s.segments);
+        segs.push({ classId: issue.rowKey, from: fromMin(best.rg[0]), to: fromMin(best.rg[1]) });
+        segs.sort(function (a, b) { return toMin(a.from) - toMin(b.from); });
+        var merged = [];
+        segs.forEach(function (g) {
+          var last = merged[merged.length - 1];
+          if (last && last.classId === g.classId && last.to === g.from) last.to = g.to;
+          else merged.push({ classId: g.classId, from: g.from, to: g.to });
+        });
+        best.s.segments = formatSegments(merged);
+        maxFix--;
+      }
+    }
+    function repairPartly(ctx, d, dayShifts, R) { repair(ctx, d, dayShifts, R, Math.floor(R() * 3)); }
+
+    function applyStatuses(f, list, staff, headName, today, R) {
+      var curStart = monthStart(today), nextStart = addMonths(curStart, 1);
+      var weekEnd = addDays(weekStart(today), 13);
+      var editors = staff.filter(function (s) { return s.role === 'rot' || s.role === 'chief'; }).map(function (s) { return s.rec.name; });
+      list.forEach(function (s) {
+        var plannedAt = s.date < curStart ? addDays(curStart, -40) : s.date < nextStart ? addDays(curStart, -6) : addDays(today, -2);
+        s.editor = editors[Math.floor(R() * editors.length)] || '';
+        s.editedAt = plannedAt + ' 17:' + pad2(Math.floor(R() * 50) + 5) + ':00';
+        if (s.date < nextStart) {
+          s.status = STATUS.FIXED;
+          s.approver = headName + '（園長）';
+          s.approvedAt = (s.date < curStart ? addDays(curStart, -35) : addDays(curStart, -5)) + ' 18:10:00';
+        } else {
+          // 翌月：園ごとに作成の進み具合を変える
+          if (f.id === 'E01') s.status = STATUS.PENDING;
+          else if (f.id === 'E02') s.status = STATUS.DRAFT;
+          else s.status = s.date < addDays(nextStart, 14) ? STATUS.PENDING : STATUS.DRAFT;
+          s.approver = ''; s.approvedAt = '';
+        }
+      });
+      // 今月の確定済みシフトに「変更（承認待ち・変更中）」を混ぜる
+      var cand = list.filter(function (s) {
+        return s.date >= today && s.date <= weekEnd && s.kind === KIND.WORK && hasTimes(s) && dow(s.date) !== 6 && !/パート/.test(s.staffName);
+      });
+      var nChanges = f.id === 'E02' ? 7 : f.id === 'E03' ? 4 : 5;
+      for (var i = 0; i < nChanges && cand.length; i++) {
+        var idx = Math.floor(R() * cand.length);
+        var s = cand.splice(idx, 1)[0];
+        s.prevFixed = shiftText(s);
+        var st = staff.filter(function (x) { return x.rec.id === s.staffId; })[0];
+        if (i % 3 === 0) {
+          s.type = '有休'; s.kind = KIND.PAID; s.start = ''; s.end = ''; s.breakMin = 0; s.breakStart = ''; s.segments = '';
+          s.note = '私用のため';
+        } else if (i % 3 === 1) {
+          var st0 = toMin(s.start), en0 = toMin(s.end);
+          s.start = fromMin(st0 + 30); s.end = fromMin(Math.min(en0 + 30, 19 * 60));
+          s.note = '通院のため30分遅らせる';
+        } else {
+          s.end = fromMin(toMin(s.end) - 60);
+          s.note = '早退（子の行事）';
+        }
+        s.status = i < Math.ceil(nChanges * 0.6) ? STATUS.PENDING : STATUS.DRAFT;
+        s.editor = st ? st.rec.name : s.editor;
+        s.editedAt = addDays(today, -1) + ' 1' + (i % 8) + ':2' + i + ':00';
+        s.approver = ''; s.approvedAt = '';
+      }
+    }
+
+    return { build: build, FACILITIES: FACILITIES };
+  })();
+
+  return {
+    STATUS: STATUS, KIND: KIND, SLOT: SLOT, DOW: DOW, APPROVER_ROLES: APPROVER_ROLES,
+    pad2: pad2, toMin: toMin, fromMin: fromMin, parseISO: parseISO, toISO: toISO, addDays: addDays, dow: dow,
+    monthStart: monthStart, monthEnd: monthEnd, addMonths: addMonths, weekStart: weekStart, dateRange: dateRange,
+    nowJST: nowJST, todayJST: todayJST, mdLabel: mdLabel, round2: round2,
+    holidayName: holidayName, closedReason: closedReason, dayType: dayType,
+    hasTimes: hasTimes, calcHours: calcHours, hoursLabel: hoursLabel, laborWarnings: laborWarnings,
+    parseSegments: parseSegments, formatSegments: formatSegments, shiftText: shiftText, statusCounts: statusCounts,
+    settingsMap: settingsMap, num: num, bool: bool, patternsFor: patternsFor, buildContext: buildContext,
+    evaluateDay: evaluateDay, evaluateRange: evaluateRange, staffSummary: staffSummary, WHY_TEXT: WHY_TEXT,
+    Demo: Demo
+  };
+})();

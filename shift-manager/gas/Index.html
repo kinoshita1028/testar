@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <title>シフト管理</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=BIZ+UDGothic:wght@700&family=BIZ+UDPGothic:wght@400;700&family=Zen+Maru+Gothic:wght@500;700&display=swap" rel="stylesheet">
+  <?!= include('Styles'); ?>
+</head>
+<body>
+  <div id="app">
+    <div class="boot-loading"><div class="spinner"></div><p>シフト表を読み込んでいます…</p></div>
+  </div>
+  <script>window.BOOT = <?!= boot ?>;</script>
+  <?!= include('SharedJs'); ?>
+  <?!= include('App'); ?>
+</body>
+</html>
