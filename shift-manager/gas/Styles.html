@@ -87,8 +87,9 @@ button { cursor: pointer; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---------- ヘッダー ---------- */
+body::before { content: ''; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 41; background: var(--surface); }
 .topbar {
-  position: sticky; top: 0; z-index: 40;
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 40;
   display: flex; align-items: center; gap: 12px;
   padding: 8px 16px;
   background: var(--surface);
@@ -426,7 +427,7 @@ table.plain td.num { font-family: var(--font-num); }
 .quickbar .pat { min-height: 46px; min-width: 76px; flex: none; }
 
 /* ---------- トースト・はんこ ---------- */
-.toasts { position: fixed; right: 16px; bottom: 16px; z-index: 120; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }
+.toasts { position: fixed; right: calc(16px + env(safe-area-inset-right, 0px)); bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 120; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }
 .toast { background: var(--ink); color: #fff; padding: 10px 16px; border-radius: 12px; box-shadow: var(--shadow-lg); font-size: 14px; max-width: min(420px, calc(100vw - 32px)); animation: pop .2s ease-out; pointer-events: auto; }
 .toast.err { background: var(--short); }
 .toast.ok { background: var(--primary-strong); }
@@ -510,16 +511,13 @@ table.cmp { border-collapse: separate; border-spacing: 0; }
 @media (max-width: 640px) {
   body { font-size: 14px; }
   :root { --name-w: 104px; --cell-w: 54px; --week-cell-w: 118px; --tl-col: 40px; }
-  .topbar { padding: 6px 10px; gap: 8px; }
+  .topbar { gap: 8px; }
   .brand-title { font-size: 15px; }
   .brand-mark { width: 28px; height: 28px; }
   .page-tabs { margin-left: 0; }
   .page-tabs button { padding: 6px 10px; font-size: 13px; }
   .user-chip .who { max-width: 76px; }
-  .toolbar { padding: 8px 10px; }
-  .grid-wrap, .panel { margin-left: 10px; margin-right: 10px; }
-  .legend, .filter-row, .day-summary, .hq-cards, .section-title, .hq-day { padding-left: 10px; padding-right: 10px; }
-  .issues, .ok-banner { margin-left: 10px; margin-right: 10px; }
+  .toolbar { padding-top: 8px; padding-bottom: 8px; }
   .grid-wrap { max-height: calc(100dvh - 250px); }
   .facility-select { max-width: 160px; font-size: 15px; }
   .btn .lbl-long { display: none; }

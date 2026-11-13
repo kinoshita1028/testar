@@ -21,4 +21,8 @@ page = page.replace('<base target="_top">', '<meta name="viewport" content="widt
 if (/<\?/.test(page)) throw new Error('unresolved scriptlet in preview');
 fs.mkdirSync(path.join(root, 'preview'), { recursive: true });
 fs.writeFileSync(path.join(root, 'preview', 'index.html'), page);
-console.log('built gas/SharedJs.html and preview/index.html', (page.length / 1024).toFixed(0) + 'KB');
+// 公開用（claude.ai のアーティファクト）：html/head/body を外し、タイトルを先頭に置く
+const headInner = page.match(/<head>([\s\S]*?)<\/head>/)[1].replace(/<meta[^>]*>\s*/g, '').replace(/<title>[\s\S]*?<\/title>\s*/, '');
+const bodyInner = page.match(/<body>([\s\S]*?)<\/body>/)[1];
+fs.writeFileSync(path.join(root, 'preview', 'artifact.html'), '<title>こども園シフト管理</title>\n' + headInner + bodyInner);
+console.log('built gas/SharedJs.html, preview/index.html, preview/artifact.html', (page.length / 1024).toFixed(0) + 'KB');

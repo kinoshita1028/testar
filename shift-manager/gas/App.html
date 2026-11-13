@@ -790,6 +790,12 @@
     box.appendChild(t);
     setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, type === 'err' ? 6000 : 3200);
   }
+  function askConfirm(title, message, okLabel, danger, then) {
+    var m = openModal({ title: title });
+    m.body.innerHTML = '<p style="margin:0">' + esc(message).replace(/\n/g, '<br>') + '</p>';
+    m.foot.innerHTML = '<button class="btn" data-close>キャンセル</button><button class="btn ' + (danger ? 'danger' : 'primary') + '" data-yes>' + esc(okLabel) + '</button>';
+    $('[data-yes]', m.foot).addEventListener('click', function () { m.close(); then(); });
+  }
   function showStamp(name) {
     var d = document.createElement('div');
     d.className = 'stamp-anim';
@@ -963,8 +969,9 @@
         save([item], m);
       }
       if (e.target.closest('[data-del]')) {
-        if (!confirm(staff.name + ' さんの ' + S.mdLabel(date) + ' の勤務を消しますか？' + (cur && cur.status === ST.FIXED ? '\n（確定済みのため、承認印が押されるまで「削除予定」として残ります）' : ''))) return;
-        save([{ staffId: staffId, date: date, clear: true, base: cur ? cur.editedAt || '' : '' }], m);
+        askConfirm('勤務を消す', staff.name + ' さんの ' + S.mdLabel(date) + ' の勤務を消します。' + (cur && cur.status === ST.FIXED ? '\n確定済みのため、承認印が押されるまで「削除予定」として残ります。' : ''), '消す', true, function () {
+          save([{ staffId: staffId, date: date, clear: true, base: cur ? cur.editedAt || '' : '' }], m);
+        });
       }
     });
   }
@@ -1133,9 +1140,10 @@
       ['summary', '勤務時間の集計', '誰が・いつ・何時間働いたか（月ごと）。CSV・スプレッドシートに出力'],
       ['rules', '配置基準と判定のしくみ', '照合しているルールと、充足・要確認・不足の決め方'],
       ['history', '変更履歴', '誰がいつ何を変えたか'],
-      ['print', '印刷する', '表示中の一覧を印刷（A3横を想定）'],
+      window.__PREVIEW__ ? null : ['print', '印刷する', '表示中の一覧を印刷（A3横を想定）'],
       ['refresh', '最新の内容に更新', 'ほかのタブレットで入力された内容を読み込みます']
     ];
+    items = items.filter(Boolean);
     m.body.innerHTML = '<div class="list">' + items.map(function (it) {
       return '<button class="row" data-m="' + it[0] + '" style="width:100%;border:0;text-align:left"><div class="main"><div class="a">' + esc(it[1]) + '</div><div class="c">' + esc(it[2]) + '</div></div><span class="muted">›</span></button>';
     }).join('') + '</div>' +
@@ -1201,8 +1209,10 @@
             return '<tr><td><b>' + esc(r.name) + '</b></td><td>' + esc(r.job) + '</td><td>' + esc(r.employment) + '</td><td class="r num">' + r.days + '</td><td class="r num">' + r.satDays + '</td><td class="r num">' + r.off + '</td><td class="r num">' + r.paid +
               '</td><td class="r num"><b>' + hoursText(r.workMin) + '</b></td><td class="r num">' + hoursText(r.fixedWorkMin) + '</td><td class="r num">' + (r.unfixed || '') + '</td><td class="r num" style="color:var(--warn)">' + (r.warnings || '') + '</td></tr>';
           }).join('') + '</tbody></table></div>';
-        m.foot.innerHTML = '<button class="btn left" data-csv="detail">CSV：勤務明細</button><button class="btn" data-csv="sum">CSV：集計</button>' +
-          '<button class="btn primary" data-export>スプレッドシートに月次集計を作成</button>';
+        m.foot.innerHTML = window.__PREVIEW__
+          ? '<span class="left small muted">GAS版では、ここから CSV（勤務明細・集計）の出力と、スプレッドシートへの月次集計の作成ができます。</span><button class="btn primary" data-close>閉じる</button>'
+          : '<button class="btn left" data-csv="detail">CSV：勤務明細</button><button class="btn" data-csv="sum">CSV：集計</button>' +
+            '<button class="btn primary" data-export>スプレッドシートに月次集計を作成</button>';
         m._rows = rows; m._list = list;
       }).catch(function (e) { handleErr(e); });
     }
@@ -1512,7 +1522,9 @@
       case 'menu': openMenu(); break;
       case 'user': openUserMenu(); break;
       case 'preview-reset':
-        if (confirm('デモデータを最初の状態に戻しますか？')) { window.__resetPreviewData(); state.shifts = {}; state.loaded = {}; state.hq.data = null; dirty(); reloadRange(true); }
+        askConfirm('デモデータに戻す', 'このブラウザで入力した内容を消して、デモデータを最初の状態に戻します。', '戻す', true, function () {
+          window.__resetPreviewData(); state.shifts = {}; state.loaded = {}; state.hq.data = null; dirty(); reloadRange(true);
+        });
         break;
       case 'hqview': state.hq.view = ds.view; LS.set('hqView', ds.view); state.hq.data = null; state.hq.more = false; renderHQ(); break;
       case 'hqnav': hqMove(Number(ds.dir)); break;
