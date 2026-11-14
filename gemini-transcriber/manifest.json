@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini リアルタイム文字起こし",
+  "short_name": "Gemini文字起こし",
+  "version": "1.0.0",
+  "description": "Gemini API で音声をリアルタイムに文字起こしし、文脈から誤変換を自動修正。ブロックごと・まとめてワンクリックでコピーできます。",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "sidePanel", "offscreen", "clipboardWrite"],
+  "host_permissions": ["https://generativelanguage.googleapis.com/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "action": {
+    "default_title": "Gemini 文字起こしを開く",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

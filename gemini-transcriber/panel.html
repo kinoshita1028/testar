@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gemini 文字起こし</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-mic" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM19 11a7 7 0 0 1-14 0M12 18v3"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></g></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+      <symbol id="i-edit" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4"/></symbol>
+      <symbol id="i-diff" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M4 7h10M4 12h16M4 17h7"/><circle cx="18" cy="7" r="2" fill="currentColor"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></symbol>
+      <symbol id="i-retry" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></symbol>
+      <symbol id="i-gear" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></g></symbol>
+      <symbol id="i-popout" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M14 4h6v6M20 4l-8 8M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+      <symbol id="i-back" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M15 5l-7 7 7 7"/></symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></g></symbol>
+      <symbol id="i-sparkle" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2l1.8 5.6L19.5 9.5l-5.7 1.9L12 17l-1.8-5.6L4.5 9.5l5.7-1.9z"/></symbol>
+    </defs>
+  </svg>
+
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <img src="icons/icon32.png" width="22" height="22" alt="">
+        <span>Gemini 文字起こし</span>
+      </div>
+      <div class="topbar-actions">
+        <button id="popoutBtn" class="icon-btn" type="button" title="別ウィンドウで開く" aria-label="別ウィンドウで開く">
+          <svg><use href="#i-popout"/></svg>
+        </button>
+        <button id="settingsBtn" class="icon-btn" type="button" title="設定" aria-label="設定">
+          <svg><use href="#i-gear"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" hidden>
+      <span id="bannerText"></span>
+      <button id="bannerAction" class="btn small" type="button"></button>
+    </div>
+
+    <section class="control">
+      <button id="recordBtn" class="record-btn" type="button" aria-pressed="false">
+        <svg class="ico-mic"><use href="#i-mic"/></svg>
+        <svg class="ico-stop"><use href="#i-stop"/></svg>
+        <span class="record-label">録音開始</span>
+      </button>
+      <div class="meter-wrap">
+        <div class="status-line">
+          <span id="statusDot" class="status-dot"></span>
+          <span id="statusText">待機中</span>
+          <span id="timer" class="timer"></span>
+        </div>
+        <div class="meter" title="入力レベル（縦線より右に振れると発話として検出）">
+          <div id="meterFill" class="meter-fill"></div>
+          <div id="meterThreshold" class="meter-threshold"></div>
+        </div>
+      </div>
+    </section>
+
+    <main id="list" class="list">
+      <div id="empty" class="empty">
+        <div class="empty-icon"><svg><use href="#i-mic"/></svg></div>
+        <p class="empty-title">話した内容がここにブロックで並びます</p>
+        <ol class="empty-steps">
+          <li><button id="emptySettings" class="link" type="button">設定</button>で Gemini API キーを入力</li>
+          <li>「録音開始」を押して話す</li>
+          <li>話し終わる（少し間を空ける）たびに、文字起こし → 文脈で自動校正</li>
+          <li>ブロックごと、または「すべてコピー」でコピー</li>
+        </ol>
+      </div>
+
+      <div id="liveCard" class="live-card" hidden>
+        <div class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        <span>話しています…</span>
+        <span id="liveTime" class="live-time"></span>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <div id="stats" class="stats"></div>
+      <div class="footer-actions">
+        <button id="clearBtn" class="btn ghost" type="button">クリア</button>
+        <button id="copyAllBtn" class="btn primary" type="button">
+          <svg><use href="#i-copy"/></svg><span>すべてコピー</span>
+        </button>
+      </div>
+    </footer>
+
+    <!-- Settings -->
+    <section id="settingsView" class="settings" hidden aria-label="設定">
+      <header class="settings-head">
+        <button id="settingsClose" class="icon-btn" type="button" aria-label="戻る"><svg><use href="#i-back"/></svg></button>
+        <h2>設定</h2>
+      </header>
+
+      <div class="settings-body">
+        <div class="card">
+          <h3>Gemini API キー</h3>
+          <div class="key-row">
+            <input id="apiKey" data-setting="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="ここに API キーを貼り付け">
+            <button id="toggleKey" class="icon-btn bordered" type="button" title="表示／非表示" aria-label="キーを表示"><svg><use href="#i-eye"/></svg></button>
+          </div>
+          <div class="row-actions">
+            <button id="saveKey" class="btn primary small" type="button">保存</button>
+            <button id="testKey" class="btn small" type="button">接続テスト</button>
+            <span id="keyStatus" class="key-status"></span>
+          </div>
+          <p class="hint">
+            <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> で発行できます。
+            キーはこのブラウザ内（chrome.storage.local）にのみ保存され、Gemini API 以外には送信されません。
+          </p>
+        </div>
+
+        <div class="card">
+          <h3>モデル</h3>
+          <label class="field">
+            <span>文字起こし用</span>
+            <input data-setting="transcribeModel" list="modelList" spellcheck="false" placeholder="auto">
+          </label>
+          <label class="field">
+            <span>校正用</span>
+            <input data-setting="correctModel" list="modelList" spellcheck="false" placeholder="auto">
+          </label>
+          <datalist id="modelList"><option value="auto">自動（最新の Flash 系）</option></datalist>
+          <p class="hint">「auto」は利用可能な最新の Flash 系モデルを自動で選びます。「接続テスト」後は候補から選べます。<span id="autoModelInfo"></span></p>
+        </div>
+
+        <div class="card">
+          <h3>文字起こし</h3>
+          <label class="field">
+            <span>言語</span>
+            <select data-setting="language">
+              <option value="ja">日本語</option>
+              <option value="en">英語</option>
+              <option value="auto">自動（話された言語のまま）</option>
+            </select>
+          </label>
+          <label class="check">
+            <input type="checkbox" data-setting="removeFillers">
+            <span>「えー」「あのー」などのフィラーを除く</span>
+          </label>
+          <label class="field">
+            <span>用語集（固有名詞・専門用語を 1 行に 1 つ）</span>
+            <textarea data-setting="glossary" rows="4" placeholder="例：&#10;Gemini&#10;Kubernetes&#10;山田太郎"></textarea>
+          </label>
+        </div>
+
+        <div class="card">
+          <h3>文脈による自動校正</h3>
+          <label class="check">
+            <input type="checkbox" data-setting="enableCorrection">
+            <span>文字起こし後に Gemini で誤変換を修正する</span>
+          </label>
+          <label class="field">
+            <span>参考にする直前のブロック数 <output data-for="contextBlocks"></output></span>
+            <input type="range" data-setting="contextBlocks" min="0" max="15" step="1">
+          </label>
+        </div>
+
+        <div class="card">
+          <h3>ブロックの区切り方</h3>
+          <label class="field">
+            <span>この長さ黙ったら区切る <output data-for="silenceMs"></output></span>
+            <input type="range" data-setting="silenceMs" min="400" max="3000" step="100">
+          </label>
+          <label class="field">
+            <span>マイク感度 <output data-for="sensitivity"></output></span>
+            <input type="range" data-setting="sensitivity" min="0" max="100" step="5">
+          </label>
+          <label class="field">
+            <span>1 ブロックの最大長（超えたら次の小休止で区切る） <output data-for="maxSegmentSec"></output></span>
+            <input type="range" data-setting="maxSegmentSec" min="8" max="60" step="1">
+          </label>
+        </div>
+
+        <div class="card">
+          <h3>コピー</h3>
+          <label class="check">
+            <input type="checkbox" data-setting="autoCopy">
+            <span>話し終わるたびに、そのブロックを自動でクリップボードへコピー</span>
+          </label>
+          <label class="field">
+            <span>「すべてコピー」の区切り</span>
+            <select data-setting="copySeparator">
+              <option value="newline">改行</option>
+              <option value="blank">空行</option>
+              <option value="space">スペース</option>
+              <option value="none">区切りなし</option>
+            </select>
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </div>
+
+  <template id="blockTpl">
+    <article class="block">
+      <div class="block-head">
+        <span class="block-time"></span>
+        <span class="block-dur"></span>
+        <span class="chip"><span class="spinner"></span><span class="chip-text"></span></span>
+      </div>
+      <div class="block-body"></div>
+      <div class="block-note" hidden></div>
+      <div class="block-actions">
+        <button class="btn small copy-btn" type="button" data-action="copy">
+          <svg class="ico-copy"><use href="#i-copy"/></svg><svg class="ico-check"><use href="#i-check"/></svg><span>コピー</span>
+        </button>
+        <button class="icon-btn" type="button" data-action="edit" title="編集" aria-label="編集"><svg><use href="#i-edit"/></svg></button>
+        <button class="icon-btn" type="button" data-action="diff" title="修正箇所（原文との差分）を表示" aria-label="差分を表示"><svg><use href="#i-diff"/></svg></button>
+        <button class="btn small" type="button" data-action="revert" hidden>原文に戻す</button>
+        <button class="btn small warn" type="button" data-action="retry" hidden><svg><use href="#i-retry"/></svg><span>再試行</span></button>
+        <span class="spacer"></span>
+        <button class="icon-btn danger" type="button" data-action="delete" title="削除" aria-label="削除"><svg><use href="#i-trash"/></svg></button>
+      </div>
+    </article>
+  </template>
+
+  <script type="module" src="panel.js"></script>
+</body>
+</html>
