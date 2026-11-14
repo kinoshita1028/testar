@@ -78,9 +78,12 @@
       </div>
 
       <div id="liveCard" class="live-card" hidden>
-        <div class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
-        <span>話しています…</span>
-        <span id="liveTime" class="live-time"></span>
+        <div class="live-head">
+          <div class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+          <span>話しています…</span>
+          <span id="liveTime" class="live-time"></span>
+        </div>
+        <div id="liveText" class="live-text" hidden></div>
       </div>
     </main>
 
@@ -120,9 +123,36 @@
         </div>
 
         <div class="card">
+          <h3>文字起こしの方式</h3>
+          <div class="engine-options" role="radiogroup">
+            <label class="engine">
+              <input type="radio" name="engine" value="live" data-setting="transcribeEngine">
+              <span><b>リアルタイム（おすすめ）</b><small>Gemini 3.5 Transcribe Live。話している途中から文字が出て、黙った時点で確定します</small></span>
+            </label>
+            <label class="engine">
+              <input type="radio" name="engine" value="transcribe" data-setting="transcribeEngine">
+              <span><b>ブロック単位：文字起こし専用モデル</b><small>Gemini 3.5 Transcribe。黙った後にまとめて送信（1〜2 秒後に表示）</small></span>
+            </label>
+            <label class="engine">
+              <input type="radio" name="engine" value="generate" data-setting="transcribeEngine">
+              <span><b>ブロック単位：汎用 Flash モデル</b><small>指示文で文字起こし。専用モデルが使えない環境向け</small></span>
+            </label>
+          </div>
+          <p class="hint">リアルタイム／専用モデルで失敗したブロックは、自動で汎用 Flash モデルに切り替えて文字起こしします。</p>
+        </div>
+
+        <div class="card">
           <h3>モデル</h3>
+          <label class="field" data-engine="live">
+            <span>リアルタイム文字起こし用</span>
+            <input data-setting="liveModel" list="liveModelList" spellcheck="false" placeholder="gemini-3.5-transcribe-live">
+          </label>
+          <label class="field" data-engine="transcribe">
+            <span>文字起こし専用モデル</span>
+            <input data-setting="transcribeBatchModel" list="transcribeModelList" spellcheck="false" placeholder="gemini-3.5-transcribe">
+          </label>
           <label class="field">
-            <span>文字起こし用</span>
+            <span id="generateModelLabel">汎用 Flash（予備）</span>
             <input data-setting="transcribeModel" list="modelList" spellcheck="false" placeholder="auto">
           </label>
           <label class="field">
@@ -130,6 +160,8 @@
             <input data-setting="correctModel" list="modelList" spellcheck="false" placeholder="auto">
           </label>
           <datalist id="modelList"><option value="auto">自動（最新の Flash 系）</option></datalist>
+          <datalist id="liveModelList"><option value="gemini-3.5-transcribe-live"></option></datalist>
+          <datalist id="transcribeModelList"><option value="gemini-3.5-transcribe"></option></datalist>
           <p class="hint">「auto」は利用可能な最新の Flash 系モデルを自動で選びます。「接続テスト」後は候補から選べます。<span id="autoModelInfo"></span></p>
         </div>
 
@@ -145,10 +177,10 @@
           </label>
           <label class="check">
             <input type="checkbox" data-setting="removeFillers">
-            <span>「えー」「あのー」などのフィラーを除く</span>
+            <span>「えー」「あのー」などのフィラーや言い直しを除く<small class="sub">専用モデルでは SMART モード、オフで VERBATIM（逐語）モード</small></span>
           </label>
           <label class="field">
-            <span>用語集（固有名詞・専門用語を 1 行に 1 つ）</span>
+            <span>用語集（固有名詞・専門用語を 1 行に 1 つ。認識のヒントと校正の両方に使います）</span>
             <textarea data-setting="glossary" rows="4" placeholder="例：&#10;Gemini&#10;Kubernetes&#10;山田太郎"></textarea>
           </label>
         </div>
@@ -208,6 +240,7 @@
       <div class="block-head">
         <span class="block-time"></span>
         <span class="block-dur"></span>
+        <span class="block-engine"></span>
         <span class="chip"><span class="spinner"></span><span class="chip-text"></span></span>
       </div>
       <div class="block-body"></div>

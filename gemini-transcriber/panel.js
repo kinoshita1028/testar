@@ -1,6 +1,10 @@
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, loadBlocks, saveBlocksSoon, flushBlocks } from './lib/storage.js';
-import { transcribeAudio, correctText, listModels, resolveModel, pickAutoModel } from './lib/gemini.js';
+import {
+  transcribeAudio, transcribeWithTranscribeModel, correctText, listModels, resolveModel, pickAutoModel,
+  languageCodesFor, vocabularyFrom,
+} from './lib/gemini.js';
 import { SpeechRecorder } from './lib/recorder.js';
+import { LiveTranscriber } from './lib/live.js';
 import { encodeWav, bytesToBase64 } from './lib/wav.js';
 import { diffTokens, countHunks } from './lib/diff.js';
 import { copyText } from './lib/clipboard.js';
@@ -24,6 +28,10 @@ const ui = {
   emptySettings: $('#emptySettings'),
   liveCard: $('#liveCard'),
   liveTime: $('#liveTime'),
+  liveText: $('#liveText'),
+  generateModelLabel: $('#generateModelLabel'),
+  liveModelList: $('#liveModelList'),
+  transcribeModelList: $('#transcribeModelList'),
   stats: $('#stats'),
   copyAllBtn: $('#copyAllBtn'),
   clearBtn: $('#clearBtn'),
@@ -51,7 +59,17 @@ const state = {
   level: null,
   correctionChain: Promise.resolve(),
   micBanner: null,
+  // real-time (Live API) session
+  live: null,
+  liveStatus: 'off', // off | connecting | ready | reconnecting | failed
+  currentTurn: null,
+  transcribeModelBroken: '',
 };
+
+// One entry per utterance while the Live API works on it.
+const turns = new Map(); // turn id -> { id, session, text, block, discarded, failed, pendingFinal, resolve }
+const ENGINE_LABEL = { live: 'Live', transcribe: 'Transcribe', generate: 'Flash' };
+const LIVE_SETUP_KEYS = ['transcribeEngine', 'liveModel', 'language', 'glossary', 'removeFillers'];
 
 const audioStore = new Map(); // block id -> base64 WAV (memory only, for retries)
 const MAX_AUDIO_KEPT = 30;
@@ -130,6 +148,9 @@ function renderBlock(b) {
 
   $('.block-time', el).textContent = formatClock(b.createdAt);
   $('.block-dur', el).textContent = b.durationMs ? `${(b.durationMs / 1000).toFixed(1)}秒` : '';
+  const engineEl = $('.block-engine', el);
+  engineEl.textContent = ENGINE_LABEL[b.engine] || '';
+  engineEl.title = b.engine === 'live' ? 'リアルタイム文字起こし' : b.engine === 'transcribe' ? '文字起こし専用モデル' : '汎用 Flash モデル';
 
   // status chip
   const chip = $('.chip', el);
@@ -190,10 +211,17 @@ function noteFor(b) {
     return [`${prefix}${b.error.message}`, b.error.stage === 'correct' ? 'is-warn' : 'is-error'];
   }
   if (b.correctionSkipped) return ['校正結果が原文から大きく変わったため、原文のままにしました', 'is-warn'];
+  if (b.info) return [b.info, 'is-info'];
   return ['', ''];
 }
 
 function bodyNodes(b, v) {
+  if (b.status === 'transcribing' && b.liveText) {
+    const span = document.createElement('span');
+    span.className = 'pending-text';
+    span.textContent = b.liveText;
+    return [span];
+  }
   if (b.status === 'transcribing') {
     const sk = document.createElement('div');
     sk.className = 'skeleton';
@@ -260,9 +288,8 @@ function updateChrome() {
 
 // ============================================================== pipeline
 
-function handleSegment(seg) {
-  const stick = isNearBottom();
-  const b = {
+function newBlock(seg) {
+  return {
     id: uid(),
     createdAt: seg.startedAt || Date.now(),
     durationMs: Math.round(seg.durationMs),
@@ -275,24 +302,84 @@ function handleSegment(seg) {
     error: null,
     copied: false,
     correctionSkipped: false,
+    engine: null,
+    info: null,
+    liveText: '',
   };
+}
+
+// Speech started: open a turn on the Live session (if one is ready).
+function handleSpeechStart({ startedAt, preRoll }) {
+  const turn = { id: uid(), startedAt, session: null, text: '', block: null };
+  turns.set(turn.id, turn);
+  state.currentTurn = turn;
+  const live = state.live;
+  if (live && !live.dead && !live.closing) {
+    turn.session = live;
+    live.startTurn(turn.id);
+    live.appendAudio(preRoll);
+  }
+  setLiveText('');
+}
+
+function handleSpeechFrame(frame) {
+  const turn = state.currentTurn;
+  if (turn?.session && !turn.failed) turn.session.appendAudio(frame);
+}
+
+// Speech ended (the speaker paused): this becomes a block.
+function handleSegment(seg) {
+  const turn = state.currentTurn;
+  state.currentTurn = null;
+  setLiveText('');
+  if (turn?.session) turn.session.endTurn(turn.id);
+
+  if (seg.discarded) {
+    if (turn) {
+      turn.discarded = true;
+      if (!turn.session) turns.delete(turn.id);
+    }
+    return;
+  }
+
+  const stick = isNearBottom();
+  const b = newBlock(seg);
   state.blocks.push(b);
   audioStore.set(b.id, bytesToBase64(encodeWav(seg.samples, seg.sampleRate)));
   while (audioStore.size > MAX_AUDIO_KEPT) audioStore.delete(audioStore.keys().next().value);
+
+  if (turn?.session) {
+    b.engine = 'live';
+    b.liveText = turn.text;
+    turn.block = b;
+    let resolve;
+    const done = new Promise((r) => {
+      resolve = r;
+    });
+    turn.resolve = resolve;
+    enqueueCorrection(b, done);
+    if (turn.pendingFinal) applyLiveFinal(turn, turn.pendingFinal.text, turn.pendingFinal.info);
+    else if (turn.failed) fallbackTurn(turn);
+  } else {
+    if (turn) turns.delete(turn.id);
+    runPipeline(b);
+  }
 
   renderBlock(b);
   updateChrome();
   if (stick) scrollToBottom();
   persist();
-  runPipeline(b);
 }
 
-function runPipeline(b) {
-  const transcribed = transcribeBlock(b);
+function enqueueCorrection(b, transcribed) {
   state.correctionChain = state.correctionChain
     .then(() => transcribed)
     .then((needsCorrection) => (needsCorrection ? correctBlock(b) : null))
     .catch((err) => console.error(err));
+}
+
+function runPipeline(b) {
+  enqueueCorrection(b, transcribeBlock(b));
 }
 
 function alive(b) {
@@ -304,7 +391,38 @@ function previousBlocks(b) {
   return state.blocks.slice(0, Math.max(0, idx)).filter((x) => finalText(x));
 }
 
-async function transcribeBlock(b) {
+// A transcript is ready for block b: store it and say whether to correct it next.
+function applyTranscript(b, text) {
+  if (!alive(b)) return false;
+  if (!text) {
+    // Nothing intelligible (noise, a cough...): drop the block quietly.
+    deleteBlock(b, { quiet: true });
+    return false;
+  }
+  b.raw = text;
+  b.liveText = '';
+  b.corrected = null;
+  b.changes = [];
+  b.fixCount = 0;
+  b.correctionSkipped = false;
+  b.error = null;
+  if (state.settings.enableCorrection) {
+    b.status = 'correcting';
+    renderBlock(b);
+    updateChrome();
+    persist();
+    return true;
+  }
+  finishBlock(b);
+  return false;
+}
+
+function isPermanentError(err) {
+  return [400, 403, 404].includes(err?.status);
+}
+
+// Block-by-block transcription (also the fallback for the real-time engine).
+async function transcribeBlock(b, { engine } = {}) {
   const audio = audioStore.get(b.id);
   if (!audio) {
     b.status = 'error';
@@ -314,45 +432,51 @@ async function transcribeBlock(b) {
     return false;
   }
 
+  const s = state.settings;
+  const useEngine = engine || (s.transcribeEngine === 'transcribe' ? 'transcribe' : 'generate');
   b.status = 'transcribing';
   b.error = null;
   renderBlock(b);
   updateChrome();
 
-  const s = state.settings;
   const prev = previousBlocks(b).slice(-1)[0];
+  const viaFlash = () => transcribeAudio({
+    apiKey: s.apiKey,
+    model: s.transcribeModel,
+    audioBase64: audio,
+    language: s.language,
+    removeFillers: s.removeFillers,
+    glossary: s.glossary,
+    prevText: prev ? finalText(prev).slice(-200) : '',
+  });
+
   try {
-    const text = await transcribeAudio({
-      apiKey: s.apiKey,
-      model: s.transcribeModel,
-      audioBase64: audio,
-      language: s.language,
-      removeFillers: s.removeFillers,
-      glossary: s.glossary,
-      prevText: prev ? finalText(prev).slice(-200) : '',
-    });
-    if (!alive(b)) return false;
-
-    if (!text) {
-      // Nothing intelligible (noise, a cough...): drop the block quietly.
-      deleteBlock(b, { quiet: true });
-      return false;
+    let text;
+    if (useEngine === 'transcribe' && !state.transcribeModelBroken) {
+      try {
+        text = await transcribeWithTranscribeModel({
+          apiKey: s.apiKey,
+          model: s.transcribeBatchModel,
+          audioBase64: audio,
+          language: s.language,
+          smart: s.removeFillers,
+          glossary: s.glossary,
+        });
+        b.engine = 'transcribe';
+      } catch (err) {
+        if (!isPermanentError(err)) throw err;
+        state.transcribeModelBroken = errorMessage(err);
+        toast('文字起こし専用モデルが使えないため、汎用 Flash モデルに切り替えました', 'warn');
+      }
     }
-
-    b.raw = text;
-    b.corrected = null;
-    b.changes = [];
-    b.fixCount = 0;
-    b.correctionSkipped = false;
-    if (s.enableCorrection) {
-      b.status = 'correcting';
-      renderBlock(b);
-      updateChrome();
-      persist();
-      return true;
+    if (text === undefined) {
+      text = await viaFlash();
+      b.engine = 'generate';
+      if (useEngine === 'transcribe' && state.transcribeModelBroken) {
+        b.info = `専用モデルが使えなかったため汎用 Flash で文字起こし（${state.transcribeModelBroken}）`;
+      }
     }
-    finishBlock(b);
-    return false;
+    return applyTranscript(b, text);
   } catch (err) {
     if (!alive(b)) return false;
     b.status = 'error';
@@ -362,6 +486,110 @@ async function transcribeBlock(b) {
     persist();
     return false;
   }
+}
+
+// ------------------------------------------------------- real-time engine
+
+function setLiveText(text) {
+  ui.liveText.textContent = text;
+  ui.liveText.hidden = !text;
+}
+
+function onLiveInterim(id, text) {
+  const turn = turns.get(id);
+  if (!turn || turn.discarded) return;
+  turn.text = text;
+  if (turn.block) {
+    if (turn.block.status === 'transcribing' && alive(turn.block)) {
+      turn.block.liveText = text;
+      renderBlock(turn.block);
+    }
+  } else if (state.currentTurn === turn) {
+    const stick = isNearBottom();
+    setLiveText(text);
+    if (stick) scrollToBottom();
+  }
+}
+
+function onLiveFinal(id, text, info) {
+  const turn = turns.get(id);
+  if (!turn) return;
+  if (turn.discarded) {
+    turns.delete(id);
+    return;
+  }
+  if (!turn.block) {
+    turn.pendingFinal = { text, info };
+    return;
+  }
+  applyLiveFinal(turn, text, info);
+}
+
+function applyLiveFinal(turn, text, info) {
+  turns.delete(turn.id);
+  const b = turn.block;
+  if (!alive(b)) {
+    turn.resolve(false);
+    return;
+  }
+  if (text) {
+    turn.resolve(applyTranscript(b, text));
+  } else if (info.hadInterim || turn.text || b.durationMs > 1500) {
+    fallbackTurn(turn, info.timedOut ? 'リアルタイムの確定結果が届かなかったため' : 'リアルタイムで結果が得られなかったため');
+  } else {
+    turn.resolve(applyTranscript(b, ''));
+  }
+}
+
+function onLiveTurnFailed(id) {
+  const turn = turns.get(id);
+  if (!turn) return;
+  if (turn.discarded) {
+    turns.delete(id);
+    return;
+  }
+  if (!turn.block) {
+    turn.failed = true; // handled when the speaker pauses
+    return;
+  }
+  fallbackTurn(turn);
+}
+
+function fallbackTurn(turn, why = 'リアルタイム接続が切れたため') {
+  turns.delete(turn.id);
+  const b = turn.block;
+  if (!alive(b)) {
+    turn.resolve(false);
+    return;
+  }
+  b.info = `${why}、予備モデルで文字起こししました`;
+  transcribeBlock(b, { engine: 'generate' }).then(turn.resolve);
+}
+
+function startLiveSession() {
+  const s = state.settings;
+  const session = new LiveTranscriber({
+    apiKey: s.apiKey,
+    model: (s.liveModel || DEFAULT_SETTINGS.liveModel).trim(),
+    languageCodes: languageCodesFor(s.language),
+    customVocabulary: vocabularyFrom(s.glossary),
+    mode: s.removeFillers ? 'SMART' : 'VERBATIM',
+    onInterim: onLiveInterim,
+    onFinal: onLiveFinal,
+    onTurnFailed: onLiveTurnFailed,
+    onStatus: (status, message) => {
+      if (state.live !== session) return;
+      state.liveStatus = status;
+      if (status === 'failed' && state.recording) {
+        toast(`リアルタイム接続に失敗：${message || '不明なエラー'}　ブロック単位で続けます`, 'error');
+      }
+    },
+  });
+  state.live = session;
+  state.liveStatus = 'connecting';
+  session.start().catch(() => {
+    /* reported through onStatus */
+  });
 }
 
 async function correctBlock(b) {
@@ -573,6 +801,8 @@ async function startRecording() {
     sensitivity: s.sensitivity,
     maxSegmentSec: s.maxSegmentSec,
     onSegment: handleSegment,
+    onSpeechStart: handleSpeechStart,
+    onSpeechFrame: handleSpeechFrame,
     onLevel: (level) => {
       state.level = level;
     },
@@ -598,6 +828,9 @@ async function startRecording() {
   ui.recordBtn.disabled = false;
   refreshBanner();
   updateRecordUi();
+
+  if (s.transcribeEngine === 'live') startLiveSession();
+  else state.liveStatus = 'off';
 }
 
 async function stopRecording() {
@@ -606,7 +839,12 @@ async function stopRecording() {
   state.recording = false;
   state.level = null;
   if (rec) await rec.stop({ flush: true });
+  const live = state.live;
+  state.live = null;
+  state.liveStatus = 'off';
+  live?.closeWhenIdle(9000);
   ui.liveCard.hidden = true;
+  setLiveText('');
   updateRecordUi();
 }
 
@@ -627,6 +865,22 @@ function updateRecordUi() {
 function setStatus(kind, text) {
   ui.statusDot.className = `status-dot ${kind}`;
   if (ui.statusText.textContent !== text) ui.statusText.textContent = text;
+}
+
+function engineStatusText() {
+  if (state.settings.transcribeEngine !== 'live') return 'ブロック単位';
+  switch (state.liveStatus) {
+    case 'ready':
+      return 'リアルタイム';
+    case 'connecting':
+      return 'リアルタイム接続中…';
+    case 'reconnecting':
+      return 'リアルタイム再接続中…';
+    case 'failed':
+      return 'ブロック単位（リアルタイム接続失敗）';
+    default:
+      return 'リアルタイム';
+  }
 }
 
 const dbPercent = (amp) => {
@@ -650,7 +904,7 @@ function meterLoop() {
       setStatus('speaking', '話しています');
     } else {
       ui.liveCard.hidden = true;
-      setStatus('listening', '聞き取り中（話すと自動でブロック化）');
+      setStatus('listening', `聞き取り中 · ${engineStatusText()}`);
     }
     ui.timer.textContent = formatElapsed(Date.now() - state.startedAt);
   }
@@ -725,6 +979,7 @@ const RANGE_LABEL = {
 };
 
 function readField(el) {
+  if (el.type === 'radio') return el.value;
   if (el.type === 'checkbox') return el.checked;
   if (el.type === 'range') return Number(el.value);
   if (el.dataset.setting === 'apiKey') return el.value.trim();
@@ -733,7 +988,8 @@ function readField(el) {
 }
 
 function writeField(el, value) {
-  if (el.type === 'checkbox') el.checked = Boolean(value);
+  if (el.type === 'radio') el.checked = el.value === value;
+  else if (el.type === 'checkbox') el.checked = Boolean(value);
   else el.value = value ?? '';
   updateRangeLabel(el);
 }
@@ -745,6 +1001,7 @@ function updateRangeLabel(el) {
 }
 
 function bindSettingsForm() {
+  updateEngineFields();
   for (const el of document.querySelectorAll('[data-setting]')) {
     writeField(el, state.settings[el.dataset.setting]);
     const eventName = el.type === 'range' ? 'input' : 'change';
@@ -755,10 +1012,22 @@ function bindSettingsForm() {
   }
 }
 
+function updateEngineFields() {
+  const engine = state.settings.transcribeEngine;
+  for (const el of document.querySelectorAll('[data-engine]')) el.hidden = el.dataset.engine !== engine;
+  ui.generateModelLabel.textContent = engine === 'generate' ? '文字起こし用（汎用 Flash）' : '汎用 Flash（予備・自動切り替え用）';
+}
+
 async function updateSetting(key, value) {
   state.settings[key] = value;
   await saveSettings({ [key]: value });
   if (state.recorder && RECORDER_KEYS.includes(key)) state.recorder.updateOptions({ [key]: value });
+  if (key === 'transcribeEngine') updateEngineFields();
+  if (key === 'transcribeBatchModel') state.transcribeModelBroken = '';
+  if (state.recording && LIVE_SETUP_KEYS.includes(key)
+      && (key === 'transcribeEngine' || state.settings.transcribeEngine === 'live')) {
+    toast('この変更は次に録音を開始したときに反映されます');
+  }
   if (key === 'apiKey') {
     ui.keyStatus.textContent = '';
     ui.keyStatus.className = 'key-status';
@@ -792,7 +1061,15 @@ async function testConnection() {
     const models = await listModels(key);
     fillModelList(models);
     const auto = pickAutoModel(models);
-    ui.autoModelInfo.textContent = auto ? `現在の auto → ${auto}` : '';
+    const ids = new Set(models.map((m) => m.id));
+    const liveModel = (state.settings.liveModel || DEFAULT_SETTINGS.liveModel).trim();
+    const batchModel = (state.settings.transcribeBatchModel || DEFAULT_SETTINGS.transcribeBatchModel).trim();
+    const mark = (id) => (ids.has(id) ? '✓' : '（一覧に無し・そのまま試せます）');
+    ui.autoModelInfo.textContent = [
+      auto ? `現在の auto → ${auto}` : '',
+      `リアルタイム：${liveModel} ${mark(liveModel)}`,
+      `専用：${batchModel} ${mark(batchModel)}`,
+    ].filter(Boolean).join(' / ');
     setKeyStatus('ok', `接続OK（${models.length} モデル利用可）`);
     // Warm the auto-model cache so the first block is fast.
     resolveModel(key, 'auto').catch(() => {});
@@ -804,15 +1081,26 @@ async function testConnection() {
 }
 
 function fillModelList(models) {
-  const options = [new Option('自動（最新の Flash 系）', 'auto')];
   const sorted = [...models].sort((a, b) => b.id.localeCompare(a.id, 'en', { numeric: true }));
-  for (const m of sorted) {
-    const opt = document.createElement('option');
-    opt.value = m.id;
-    opt.label = m.displayName || m.id;
-    options.push(opt);
-  }
-  ui.modelList.replaceChildren(...options);
+  const toOptions = (list, first = []) => [
+    ...first,
+    ...list.map((m) => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.label = m.displayName || m.id;
+      return opt;
+    }),
+  ];
+  const isTranscribe = (m) => /transcribe/i.test(m.id);
+  const isLive = (m) => m.methods.includes('bidiGenerateContent') || /live/i.test(m.id);
+  ui.modelList.replaceChildren(...toOptions(
+    sorted.filter((m) => m.methods.includes('generateContent') && !isTranscribe(m)),
+    [new Option('自動（最新の Flash 系）', 'auto')],
+  ));
+  const live = sorted.filter((m) => isLive(m) && isTranscribe(m));
+  ui.liveModelList.replaceChildren(...toOptions(live.length ? live : sorted.filter(isLive), live.length ? [] : [new Option('', DEFAULT_SETTINGS.liveModel)]));
+  const batch = sorted.filter((m) => isTranscribe(m) && !isLive(m));
+  ui.transcribeModelList.replaceChildren(...toOptions(batch, batch.length ? [] : [new Option('', DEFAULT_SETTINGS.transcribeBatchModel)]));
 }
 
 // ================================================================= popout

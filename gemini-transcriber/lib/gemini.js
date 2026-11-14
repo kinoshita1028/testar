@@ -83,14 +83,14 @@ export async function listModels(apiKey) {
     }
     pageToken = json.nextPageToken || '';
   } while (pageToken);
-  return models.filter((m) => m.methods.includes('generateContent'));
+  return models;
 }
 
-const EXCLUDED = /(image|tts|live|native-audio|embed|aqa|imagen|veo|computer|robotics|learnlm|gemma|banana|thinking|exp|research|transcribe|nano)/i;
+const EXCLUDED = /(image|tts|live|native-audio|embed|aqa|imagen|veo|computer|robotics|learnlm|gemma|banana|thinking|exp|research|transcribe|nano|cyber|omni|customtools)/i;
 
 /** Pick the newest general-purpose Flash model (stable preferred over preview). */
 export function pickAutoModel(models) {
-  const ids = models.map((m) => m.id);
+  const ids = models.filter((m) => m.methods.includes('generateContent')).map((m) => m.id);
   const scored = ids
     .filter((id) => /^gemini-\d/.test(id) && /flash/.test(id) && !EXCLUDED.test(id))
     .map((id) => {
@@ -192,6 +192,16 @@ async function withModel(apiKey, setting, fn) {
 // --------------------------------------------------------- transcription
 
 const LANG_LABEL = { ja: '日本語', en: '英語', auto: '' };
+const LANG_CODES = { ja: ['ja-JP'], en: ['en-US'], auto: [] };
+
+export function languageCodesFor(language) {
+  return LANG_CODES[language] || [];
+}
+
+/** Glossary textarea -> list of vocabulary phrases. */
+export function vocabularyFrom(glossary) {
+  return [...new Set(String(glossary || '').split(/[\n,、]/).map((w) => w.trim()).filter(Boolean))].slice(0, 100);
+}
 
 function transcribePrompt({ language, removeFillers, glossary, prevText }) {
   const target = language === 'auto' ? '話されている言語のまま' : `${LANG_LABEL[language] || '日本語'}で`;
@@ -243,6 +253,52 @@ export async function transcribeAudio({
     }, signal);
     return cleanTranscript(extractText(json));
   });
+}
+
+// ------------------------------------- dedicated transcription model
+
+function interactionText(json) {
+  if (typeof json?.output_text === 'string') return json.output_text;
+  const texts = [];
+  for (const step of Array.isArray(json?.steps) ? json.steps : []) {
+    if (step?.type !== 'model_output') continue;
+    for (const c of step.content || []) if (c?.type === 'text' && typeof c.text === 'string') texts.push(c.text);
+  }
+  if (!texts.length) {
+    for (const o of Array.isArray(json?.outputs) ? json.outputs : []) if (o?.type === 'text' && typeof o.text === 'string') texts.push(o.text);
+  }
+  return texts.join('');
+}
+
+/**
+ * Transcribe one block with a dedicated speech-to-text model
+ * (gemini-3.5-transcribe) through the Interactions API.
+ */
+export async function transcribeWithTranscribeModel({
+  apiKey, model = 'gemini-3.5-transcribe', audioBase64, mimeType = 'audio/wav',
+  language = 'ja', smart = true, glossary = '', signal,
+}) {
+  const config = { mode: smart ? 'smart' : 'verbatim' };
+  const codes = languageCodesFor(language);
+  if (codes.length) config.language_codes = codes;
+  const vocab = vocabularyFrom(glossary);
+  if (vocab.length) config.custom_vocabulary = vocab;
+
+  const json = await callApi('interactions', apiKey, {
+    method: 'POST',
+    signal,
+    body: {
+      model: String(model).trim().replace(/^models\//, ''),
+      input: [{ type: 'audio', data: audioBase64, mime_type: mimeType }],
+      generation_config: { transcription_config: config },
+      store: false,
+    },
+  });
+  if (json?.status === 'failed') {
+    const detail = json.errors?.[0]?.message || 'failed';
+    throw new GeminiError(`文字起こしに失敗しました：${detail}`, 400, detail);
+  }
+  return cleanTranscript(interactionText(json));
 }
 
 // ------------------------------------------------------------ correction

@@ -1,5 +1,8 @@
 // Microphone capture + energy-based voice activity detection.
-// Emits one "segment" (a block) each time the speaker pauses.
+// While someone speaks it streams 16 kHz frames (onSpeechStart / onSpeechFrame),
+// and emits one "segment" (a block) each time the speaker pauses (onSegment).
+// Every onSpeechStart is followed by exactly one onSegment; tiny noise bursts
+// come back as { discarded: true }.
 
 export const TARGET_RATE = 16000;
 
@@ -14,8 +17,13 @@ const LONG_SEGMENT_SILENCE_MS = 250; // after maxSegmentSec, cut at the next sho
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 export class SpeechRecorder {
-  constructor({ onSegment, onLevel, onEnded, silenceMs = 900, sensitivity = 60, maxSegmentSec = 20 } = {}) {
+  constructor({
+    onSegment, onSpeechStart, onSpeechFrame, onLevel, onEnded,
+    silenceMs = 900, sensitivity = 60, maxSegmentSec = 20,
+  } = {}) {
     this.onSegment = onSegment;
+    this.onSpeechStart = onSpeechStart;
+    this.onSpeechFrame = onSpeechFrame;
     this.onLevel = onLevel;
     this.onEnded = onEnded;
     this.opts = { silenceMs, sensitivity, maxSegmentSec };
@@ -82,7 +90,10 @@ export class SpeechRecorder {
 
   async stop({ flush = true } = {}) {
     if (!this.running) return;
-    if (flush && this.speaking && this.seg.length) this._endSegment(false);
+    if (this.speaking) {
+      if (!flush) this.voiced = 0; // report as discarded
+      this._endSegment(false);
+    }
     this.running = false;
     this._teardown();
   }
@@ -152,9 +163,11 @@ export class SpeechRecorder {
         this.silenceRun = 0;
         this.onset = 0;
         this.segStartedAt = Date.now() - this.seg.length * this.frameMs;
+        this._emitStart(concatFrames(this.seg));
       }
     } else {
       this.seg.push(frame);
+      this.onSpeechFrame?.(this._toTarget(frame));
       if (rms >= cont) {
         this.silenceRun = 0;
         this.voiced++;
@@ -192,25 +205,37 @@ export class SpeechRecorder {
     this.seg = [];
     this.voiced = 0;
     this.silenceRun = 0;
-    if (hardCut) {
-      this.segStartedAt = Date.now(); // still talking: next block starts right away
-    } else {
+    if (!hardCut) {
       this.speaking = false;
       this.preRoll = [];
     }
 
-    if (voicedMs < MIN_VOICED_MS || frames.length === 0) return;
+    if (voicedMs < MIN_VOICED_MS || frames.length === 0) {
+      this.onSegment?.({ discarded: true, startedAt });
+    } else {
+      const samples = this._toTarget(concatFrames(frames));
+      normalizePeak(samples);
+      this.onSegment?.({
+        samples,
+        sampleRate: TARGET_RATE,
+        startedAt,
+        durationMs: (samples.length / TARGET_RATE) * 1000,
+      });
+    }
 
-    let samples = concatFrames(frames);
-    if (this.rate !== TARGET_RATE) samples = resample(samples, this.rate, TARGET_RATE);
-    normalizePeak(samples);
+    if (hardCut && this.running) {
+      // Still talking: the next block starts right away.
+      this.segStartedAt = Date.now();
+      this._emitStart(new Float32Array(0));
+    }
+  }
 
-    this.onSegment?.({
-      samples,
-      sampleRate: TARGET_RATE,
-      startedAt,
-      durationMs: (samples.length / TARGET_RATE) * 1000,
-    });
+  _emitStart(preRoll) {
+    this.onSpeechStart?.({ startedAt: this.segStartedAt, preRoll: this._toTarget(preRoll) });
+  }
+
+  _toTarget(samples) {
+    return this.rate === TARGET_RATE ? samples.slice() : resample(samples, this.rate, TARGET_RATE);
   }
 }
 

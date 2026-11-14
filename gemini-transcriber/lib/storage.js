@@ -2,7 +2,13 @@
 
 export const DEFAULT_SETTINGS = Object.freeze({
   apiKey: '',
-  transcribeModel: 'auto',
+  // 'live'       : gemini-3.5-transcribe-live over the Live API (text appears while speaking)
+  // 'transcribe' : dedicated speech-to-text model, one request per block
+  // 'generate'   : general Flash model via generateContent, one request per block
+  transcribeEngine: 'live',
+  liveModel: 'gemini-3.5-transcribe-live',
+  transcribeBatchModel: 'gemini-3.5-transcribe',
+  transcribeModel: 'auto', // Flash model for 'generate' and as the fallback
   correctModel: 'auto',
   language: 'ja',
   removeFillers: true,
@@ -29,7 +35,7 @@ export async function saveSettings(patch) {
 
 const BLOCK_FIELDS = [
   'id', 'createdAt', 'durationMs', 'status', 'raw', 'corrected', 'edited',
-  'changes', 'fixCount', 'error', 'copied', 'correctionSkipped',
+  'changes', 'fixCount', 'error', 'copied', 'correctionSkipped', 'engine', 'info',
 ];
 
 export async function loadBlocks() {

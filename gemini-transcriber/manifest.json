@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Gemini リアルタイム文字起こし",
   "short_name": "Gemini文字起こし",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Gemini API で音声をリアルタイムに文字起こしし、文脈から誤変換を自動修正。ブロックごと・まとめてワンクリックでコピーできます。",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "sidePanel", "offscreen", "clipboardWrite"],
