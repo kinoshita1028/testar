@@ -1,5 +1,6 @@
 // AI Video Studio ローカルサーバー
 import fs from 'node:fs';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import express from 'express';
 import multer from 'multer';
@@ -157,13 +158,43 @@ app.use('/api', (req, res) => res.status(404).json({ error: `不明な API: ${re
 
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '127.0.0.1';
-app.listen(PORT, HOST, () => {
+const URL_ = `http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`;
+
+/** 起動したらブラウザを自動で開く（NO_OPEN=1 で無効） */
+function openBrowser(url) {
+  if (process.env.NO_OPEN === '1' || process.argv.includes('--no-open')) return;
+  const [cmd, args] =
+    process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
+  try {
+    const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+    child.on('error', () => {});
+    child.unref();
+  } catch {
+    /* ブラウザを開けない環境 */
+  }
+}
+
+const server = app.listen(PORT, HOST, () => {
   const ff = ffmpegStatus();
   console.log('');
-  console.log('  🎬 AI Video Studio');
-  console.log(`  → http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
+  console.log('  🎬 AI Video Studio を起動しました');
+  console.log(`  → ブラウザで ${URL_} を開いてください（自動で開きます）`);
   console.log(`  ffmpeg: ${ff.ffmpeg.path ? ff.ffmpeg.version : '見つかりません（書き出しには ffmpeg が必要です）'}`);
   console.log(`  APIキー: ${publicSettings().hasApiKey ? '設定済み' : '未設定（画面の「設定」から入力）'}${isDemo() ? ' / デモモード ON' : ''}`);
   console.log(`  既定の動画モデル: ${getSettings().videoModel}`);
   console.log('');
+  console.log('  ※ 使っている間はこの画面を閉じないでください。終了するときはこの画面を閉じます。');
+  console.log('');
+  openBrowser(URL_);
+});
+
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.log(`\n  すでに起動しています（またはポート ${PORT} が使用中です）。ブラウザで ${URL_} を開きます。\n`);
+    openBrowser(URL_);
+    setTimeout(() => process.exit(0), 1500);
+  } else {
+    console.error(e);
+    process.exit(1);
+  }
 });
