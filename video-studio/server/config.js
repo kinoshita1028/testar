@@ -35,6 +35,8 @@ export const DEFAULT_SETTINGS = {
   omniMaxImages: 10,
   omniMaxVideos: 3,
   veoMaxReferenceImages: 3,
+  // Omni の 1 回あたりの最大秒数（0 = モデルに合わせて自動）
+  omniMaxDuration: 0,
   // 生成ジョブのタイムアウト（分）
   generationTimeoutMin: 20,
 };
@@ -60,7 +62,7 @@ export function updateSettings(patch) {
     const def = DEFAULT_SETTINGS[k];
     if (typeof def === 'number') {
       const n = Number(v);
-      if (Number.isFinite(n) && n > 0) next[k] = n;
+      if (Number.isFinite(n) && (n > 0 || (n === 0 && k === 'omniMaxDuration'))) next[k] = n;
     } else if (typeof def === 'boolean') {
       next[k] = Boolean(v);
     } else {

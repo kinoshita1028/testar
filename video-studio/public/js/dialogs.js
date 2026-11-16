@@ -93,6 +93,7 @@ export function openSettings() {
       h('label', { class: 'field' }, 'Omni: 画像の最大枚数', num('omniMaxImages', 1, 50)),
       h('label', { class: 'field' }, 'Omni: 動画の最大本数', num('omniMaxVideos', 0, 10)),
       h('label', { class: 'field' }, 'Veo: 参照画像の最大枚数', num('veoMaxReferenceImages', 0, 10)),
+      h('label', { class: 'field' }, 'Omni: 1回の最大秒数（0 = モデルに合わせて自動）', num('omniMaxDuration', 0, 120)),
       h('label', { class: 'field' }, '生成のタイムアウト（分）', num('generationTimeoutMin', 1, 120)),
     ),
     h('div', { class: 'section-title' }, 'ffmpeg（書き出し・サムネイル）'),

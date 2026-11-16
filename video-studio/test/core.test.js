@@ -65,3 +65,15 @@ test('Omni: 上限を超えた画像・PDF・音声はプロンプト補助に�
   assert.equal(plan.s.usage, 'assist');
   assert.equal(plan.t.usage, 'direct');
 });
+
+test('Omni の最大秒数はモデルごとに異なる（1.2 以降は 15 秒、フレーム指定時は 10 秒）', async () => {
+  const { omniMaxDuration, effectiveMaxDuration } = await import('../public/js/shared/capabilities.js');
+  assert.equal(omniMaxDuration('gemini-omni-1.2-flash'), 15);
+  assert.equal(omniMaxDuration('gemini-omni-1.1-flash'), 10);
+  assert.equal(omniMaxDuration('gemini-omni-flash-preview'), 10);
+  assert.equal(omniMaxDuration('gemini-omni-1.1-flash', { omniMaxDuration: 20 }), 20);
+  const prof = modelProfile('gemini-omni-1.2-flash');
+  assert.equal(effectiveMaxDuration(prof, []), 15);
+  assert.equal(effectiveMaxDuration(prof, [{ kind: 'image', role: 'first' }]), 10);
+  assert.equal(effectiveMaxDuration(modelProfile('veo-3.1-generate-preview'), []), 8);
+});

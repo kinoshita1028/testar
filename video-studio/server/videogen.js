@@ -9,7 +9,7 @@ import { addMedia, getItem, mediaPath } from './media.js';
 import { createJob, logJob, runJob, updateJob } from './jobs.js';
 import { mockVideo } from './mock.js';
 import { newId, sleep } from './util.js';
-import { IMAGE_ROLES, VIDEO_ROLES, modelProfile, planAttachments } from '../public/js/shared/capabilities.js';
+import { IMAGE_ROLES, VIDEO_ROLES, effectiveMaxDuration, modelProfile, planAttachments } from '../public/js/shared/capabilities.js';
 
 const INLINE_VIDEO_LIMIT = 14 * 1024 * 1024;
 
@@ -263,6 +263,14 @@ export function startGeneration(params) {
   const { plan, errors, warnings } = planAttachments(profile, atts);
   if (errors.length) throw new Error(errors.join('\n'));
   const direct = atts.filter((a) => plan[a.id].usage === 'direct').map((a) => ({ ...a, as: plan[a.id].as }));
+  // モデルの上限秒数に収める（Omni で最初/最後のフレームを使うときは 10 秒まで）
+  if (profile.durationRange && params.duration) {
+    const maxDur = effectiveMaxDuration(profile, direct.map((d) => ({ kind: d.kind, role: d.as })));
+    if (Number(params.duration) > maxDur) {
+      warnings.push(`このモデル・添付の組み合わせでは最大 ${maxDur} 秒のため、${params.duration} 秒 → ${maxDur} 秒にしました`);
+      params = { ...params, duration: maxDur };
+    }
+  }
   const assistAtts = atts.filter((a) => plan[a.id].usage === 'assist');
 
   const extendItem = params.extendItemId ? getItem(params.extendItemId) : null;

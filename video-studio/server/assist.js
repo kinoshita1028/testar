@@ -87,7 +87,7 @@ export async function createPrompt(p) {
   if (p.mode === 'storyboard') {
     const n = Math.max(2, Math.min(12, Number(p.sceneCount) || 4));
     task = `以下の指示と添付資料をもとに、${n} シーン構成のストーリーボードを作ってください。
-各シーンは約 ${p.duration || 8} 秒（3〜10秒の範囲）、アスペクト比 ${p.aspectRatio || '16:9'}。シーン間で登場人物・世界観・色調の一貫性を保つため、共通する特徴は各プロンプトに毎回具体的に書いてください。
+各シーンは約 ${p.duration || 8} 秒（3〜${p.maxDuration || 10}秒の範囲）、アスペクト比 ${p.aspectRatio || '16:9'}。シーン間で登場人物・世界観・色調の一貫性を保つため、共通する特徴は各プロンプトに毎回具体的に書いてください。
 ${p.withNarration ? `各シーンに、その秒数で読み切れる長さ（日本語なら1秒あたり約6文字）のナレーション原稿を ${p.narrationLanguage === 'en' ? '英語' : '日本語'} で付けてください。` : 'narration は空文字にしてください。'}
 ${langLine}`;
   } else {
@@ -104,7 +104,7 @@ ${langLine}`;
   });
   const j = parseJson(text);
   if (p.mode === 'storyboard') {
-    j.scenes = (j.scenes || []).map((s) => ({ ...s, duration: Math.max(3, Math.min(10, Math.round(Number(s.duration) || p.duration || 8))) }));
+    j.scenes = (j.scenes || []).map((s) => ({ ...s, duration: Math.max(3, Math.min(Number(p.maxDuration) || 10, Math.round(Number(s.duration) || p.duration || 8))) }));
   }
   return j;
 }

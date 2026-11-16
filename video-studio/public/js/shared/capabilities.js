@@ -46,6 +46,30 @@ export function protocolFor(modelId, override = 'auto') {
   return 'interactions';
 }
 
+/**
+ * Gemini Omni の 1 回で生成できる最大秒数。
+ * Omni 1.2 Flash 以降は 15 秒、Omni 1.1 / Flash preview は 10 秒（設定で上書き可）。
+ */
+export function omniMaxDuration(modelId, settings = {}) {
+  if (Number(settings.omniMaxDuration) > 0) return Number(settings.omniMaxDuration);
+  const m = String(modelId || '').toLowerCase();
+  const v = /omni-(\d+)\.(\d+)/.exec(m);
+  if (v) return Number(v[1]) * 10 + Number(v[2]) >= 12 ? 15 : 10;
+  if (m.includes('preview')) return 10;
+  return 15;
+}
+
+/** 最初/最後のフレームを指定した Omni の生成は 10 秒まで */
+export const OMNI_FRAME_MAX_DURATION = 10;
+
+/** 添付の役割を考慮した、実際に選べる最大秒数 */
+export function effectiveMaxDuration(profile, attachments = []) {
+  if (profile.durations) return Math.max(...profile.durations);
+  const max = profile.durationRange[1];
+  const usesFrame = attachments.some((a) => a.kind === 'image' && (a.role === 'first' || a.role === 'last'));
+  return usesFrame ? Math.min(max, profile.frameMaxDuration || max) : max;
+}
+
 export function modelProfile(modelId, settings = {}, override = 'auto') {
   const protocol = protocolFor(modelId, override);
   const m = String(modelId || '').toLowerCase();
@@ -77,7 +101,8 @@ export function modelProfile(modelId, settings = {}, override = 'auto') {
     protocol,
     family: 'Gemini Omni',
     aspectRatios: ['16:9', '9:16'],
-    durationRange: [3, 10],
+    durationRange: [3, omniMaxDuration(m, settings)],
+    frameMaxDuration: OMNI_FRAME_MAX_DURATION,
     defaultDuration: 8,
     resolutions: ['360p', '720p', '1080p', '4k'],
     maxReferenceImages: settings.omniMaxImages || 10,

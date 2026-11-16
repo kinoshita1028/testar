@@ -2,7 +2,7 @@
 import { api } from '../api.js';
 import { store } from '../store.js';
 import { h, clear, toast, modal, select, segmented, fmtBytes, timeAgo, lsGet, lsSet, debounce, confirmDialog, add } from '../ui.js';
-import { modelProfile, planAttachments, defaultRole, IMAGE_ROLES, VIDEO_ROLES, protocolFor } from '../shared/capabilities.js';
+import { modelProfile, planAttachments, defaultRole, effectiveMaxDuration, IMAGE_ROLES, VIDEO_ROLES, protocolFor } from '../shared/capabilities.js';
 import { openPreview } from '../dialogs.js';
 import { narrateClips } from './narration.js';
 
@@ -86,7 +86,7 @@ export class GeneratePanel {
     const capability =
       prof.protocol === 'veo'
         ? `Veo: 最初/最後のフレーム${prof.maxReferenceImages ? `・参照画像 ${prof.maxReferenceImages} 枚` : ''}・長さ ${prof.durations.join('/')} 秒・延長（Veo生成動画）`
-        : `Gemini Omni: 画像 最大 ${prof.maxImages} 枚・動画 ${prof.maxVideos} 本・テキスト資料を直接入力／生成結果を会話で修正／3〜10 秒`;
+        : `Gemini Omni: 画像 最大 ${prof.maxImages} 枚・動画 ${prof.maxVideos} 本・テキスト資料を直接入力／生成結果を会話で修正／${prof.durationRange[0]}〜${prof.durationRange[1]} 秒（最初/最後のフレーム指定時は ${Math.min(prof.frameMaxDuration, prof.durationRange[1])} 秒まで）`;
 
     add(this.root, 
       h('div', { class: 'stack' },
@@ -136,17 +136,27 @@ export class GeneratePanel {
     // 添付
     add(this.root, this.renderAttachments(prof));
 
-    // 設定
+    // 設定（長さはモデルごとの上限まで選べる）
+    const maxDur = effectiveMaxDuration(prof, g.attachments);
+    if (prof.durationRange && (g.duration > maxDur || g.duration < prof.durationRange[0])) {
+      g.duration = Math.max(prof.durationRange[0], Math.min(maxDur, g.duration));
+      this.saveDraft();
+    }
     const durCtl = prof.durations
       ? segmented(prof.durations.map((d) => ({ value: d, label: `${d}秒` })), g.duration, (v) => this.set({ duration: Number(v) }, false))
       : (() => {
           const out = h('span', { class: 'small', style: { width: '40px', textAlign: 'right' } }, `${g.duration}秒`);
-          const r = h('input', { type: 'range', min: prof.durationRange[0], max: prof.durationRange[1], step: 1, value: g.duration });
+          const r = h('input', { type: 'range', min: prof.durationRange[0], max: maxDur, step: 1, value: g.duration });
           r.addEventListener('input', () => {
             out.textContent = `${r.value}秒`;
             this.set({ duration: Number(r.value) }, false);
           });
-          return h('div', { class: 'row' }, r, out);
+          return h('div', { class: 'stack' },
+            h('div', { class: 'row' }, r, out),
+            h('div', { class: 'tiny' }, maxDur < prof.durationRange[1]
+              ? `最初/最後のフレームを指定しているため最大 ${maxDur} 秒です（指定しなければ ${prof.durationRange[1]} 秒まで）`
+              : `このモデルは 1 回で ${prof.durationRange[0]}〜${maxDur} 秒。もっと長くしたいときは生成後に「⇥ 延長」で続きを作れます`),
+          );
         })();
     add(this.root, 
       h('div', { class: 'stack' },
@@ -200,7 +210,7 @@ export class GeneratePanel {
     const out = {};
     if (!p.resolutions.includes(this.gen.resolution)) out.resolution = p.resolutions.includes('720p') ? '720p' : p.resolutions[0];
     if (p.durations && !p.durations.includes(Number(this.gen.duration))) out.duration = p.defaultDuration;
-    if (p.durationRange && (this.gen.duration < p.durationRange[0] || this.gen.duration > p.durationRange[1])) out.duration = p.defaultDuration;
+    if (p.durationRange) out.duration = Math.max(p.durationRange[0], Math.min(p.durationRange[1], Number(this.gen.duration) || p.defaultDuration));
     if (!p.aspectRatios.includes(this.gen.aspectRatio)) out.aspectRatio = '16:9';
     return out;
   }
@@ -553,6 +563,7 @@ export class GeneratePanel {
                 mode: st.mode,
                 sceneCount: st.sceneCount,
                 duration: g.duration,
+                maxDuration: effectiveMaxDuration(this.profile, g.attachments),
                 aspectRatio: g.aspectRatio,
                 promptLanguage: st.promptLanguage,
                 withNarration: st.withNarration,
