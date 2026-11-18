@@ -49,6 +49,9 @@ export function openPreview(item) {
       h('button', { class: 'btn danger', onclick: async () => { const { deleteLibraryItem } = await import('./panels/library.js'); if (await deleteLibraryItem(item)) m.close(); } }, '🗑 削除'),
       h('a', { class: 'btn', href: item.url, download: `${item.name}${item.file.slice(item.file.lastIndexOf('.'))}` }, '⬇ ダウンロード'),
       h('button', { class: 'btn', onclick: () => { store.emit('gen:attach-item', item); m.close(); } }, '📎 生成の参考に添付'),
+      item.hasAudio && item.source !== 'narration'
+        ? h('button', { class: 'btn', title: 'この動画・音声の声をナレーションに使えるようにします', onclick: async () => { const { openCopyVoice, openDesignVoice } = await import('./voices.js'); m.close(); item.source === 'generated' ? openDesignVoice({ itemId: item.id }) : openCopyVoice(item.id); } }, item.source === 'generated' ? '🎨 この声に似た声を作る' : '🎤 この声をコピー')
+        : null,
       meta.protocol === 'interactions' ? h('button', { class: 'btn', onclick: () => { store.emit('gen:edit', item); m.close(); } }, '✎ 指示で修正') : null,
       meta.protocol === 'veo' || meta.protocol === 'interactions' ? h('button', { class: 'btn', onclick: () => { store.emit('gen:extend', item); m.close(); } }, '⇥ 延長') : null,
       h('div', { class: 'spacer' }),

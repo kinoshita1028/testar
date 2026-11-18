@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import { store } from '../store.js';
 import { h, clear, toast, select, segmented, lsGet, lsSet, debounce, add } from '../ui.js';
 import { TTS_VOICES } from '../shared/capabilities.js';
+import { openVoiceManager, openCopyVoice, openDesignVoice, previewVoice } from '../voices.js';
 import { formatTime } from '../shared/timeline-core.js';
 
 const LANGS = [
@@ -22,7 +23,10 @@ const defaults = {
   customDuration: 10,
   script: '',
   language: 'ja',
-  style: '落ち着いたトーン',
+  style: '',
+  emotion: '',
+  speed: '',
+  intonation: '',
   instruction: '',
   analyze: true,
   ttsModel: '',
@@ -32,14 +36,34 @@ const defaults = {
   muteOriginal: true,
 };
 
+export const EMOTIONS = ['', '落ち着いて', '優しく', '明るく元気に', '嬉しそうに', '楽しげに', 'ワクワクした様子で', '真剣に', '力強く', '悲しげに', '寂しげに', '怒り気味に', '驚いたように', 'ささやくように'];
+export const SPEEDS = { '': 'ふつう', ゆっくり話す: 'ゆっくり', 少しゆっくり話す: '少しゆっくり', 少し速めに話す: '少し速め', 速めに話す: '速め' };
+export const INTONATIONS = { '': 'ふつう', 抑揚を抑えて淡々と: '控えめ（淡々と）', 抑揚を大きく表情豊かに: '豊か（表情豊かに）' };
+
+/** 感情・速さ・抑揚・自由入力をまとめて、音声合成に渡す「話し方」の指示にする */
+export function composeStyle(d) {
+  return [d.emotion, d.speed, d.intonation, String(d.style || '').trim()].filter(Boolean).join('、');
+}
+
+/** 旧バージョンの「話し方」プリセットをそのまま使えるようにする */
+function migrate(d) {
+  if (d.style === '落ち着いたトーン' && d.emotion === undefined) return { ...d, style: '', emotion: '落ち着いて' };
+  return d;
+}
+
 export function getNarrDraft() {
-  return { ...defaults, ...lsGet('narrDraft', {}) };
+  return migrate({ ...defaults, ...lsGet('narrDraft', {}) });
 }
 
 function estimateSec(text, lang) {
   const t = String(text || '').trim();
   if (!t) return 0;
   return lang === 'en' ? t.split(/\s+/).length / 2.6 : [...t.replace(/\s/g, '')].length / 6;
+}
+
+function voiceLabel(id) {
+  const v = (store.voices || []).find((x) => x.id === id);
+  return v ? v.name : id;
 }
 
 /** 複数クリップに一括でナレーションを付ける（ストーリーボードから） */
@@ -55,9 +79,10 @@ export async function narrateClips(targets) {
         script: t.script,
         targetDuration: seg.duration,
         voice: d.voice,
+        voiceName: voiceLabel(d.voice),
         ttsModel: d.ttsModel || store.settings.ttsModel,
         textModel: store.settings.textModel,
-        style: d.style,
+        style: composeStyle(d),
         language: d.language,
         fit: d.fit ? 'stretch' : 'none',
         autoRewrite: d.autoRewrite,
@@ -82,6 +107,11 @@ export class NarrationPanel {
     store.on('project', () => this.renderTarget());
     store.on('models', () => this.render());
     store.on('settings', () => this.render());
+    store.on('voices', () => this.render());
+    store.on('narr:voice', (id) => {
+      this.set({ voice: id }, true);
+      store.emit('ui:tab', 'narration');
+    });
     store.on('narr:target', (clipId) => {
       this.d.target = 'clip';
       this.save();
@@ -138,7 +168,8 @@ export class NarrationPanel {
         h('div', { class: 'section-title' }, '② 原稿'),
         ta,
         this.estimateEl,
-        h('div', { class: 'row wrap' }, this.writeBtn, (this.sceneBtnBox = h('span'))),
+        h('div', { class: 'row wrap' }, this.writeBtn, (this.transcribeBtn = h('button', { class: 'btn', title: '対象のクリップで話している内容を文字にします。言葉だけ書き換えて、同じ声で読み直すときに使います', onclick: () => this.transcribe() }, '📝 元の音声を文字起こし')), (this.sceneBtnBox = h('span'))),
+        h('div', { class: 'tiny' }, '原稿の中に <short pause>（短い間）・<breath>（息つぎ）などを書くと、その場所に間や息が入ります（Gemini 3.8 TTS）。'),
         h('details', { open: !d.script },
           h('summary', {}, '原稿作成の設定'),
           h('div', { class: 'stack' },
@@ -155,15 +186,39 @@ export class NarrationPanel {
     const ttsCurrent = d.ttsModel || store.settings.ttsModel;
     const ttsOpts = ttsModels.map((m) => ({ value: m.id, label: m.label === m.id ? m.id : `${m.label} · ${m.id}` }));
     if (ttsCurrent && !ttsOpts.some((o) => o.value === ttsCurrent)) ttsOpts.unshift({ value: ttsCurrent, label: ttsCurrent });
-    const styleInput = h('input', { value: d.style, list: 'stylePresets', placeholder: '例: 落ち着いたトーン', oninput: (e) => this.set({ style: e.target.value }) });
-    add(this.root, 
+    const myVoices = store.voices || [];
+    const voiceIds = new Set([...myVoices.map((v) => v.id), ...TTS_VOICES.map(([v]) => v)]);
+    if (!voiceIds.has(d.voice)) d.voice = 'Kore';
+    const voiceOpts = [
+      ...(myVoices.length ? [{ group: 'マイボイス（コピー・デザインした声）', options: myVoices.map((v) => ({ value: v.id, label: `🎤 ${v.name}（${v.type === 'replicated' ? 'コピー' : 'デザイン'}）` })) }] : []),
+      { group: '標準の声', options: TTS_VOICES.map(([v, desc]) => ({ value: v, label: `${v}（${desc}）` })) },
+    ];
+    const isCustom = myVoices.some((v) => v.id === d.voice);
+    const emotionSel = select(EMOTIONS.map((e) => ({ value: e, label: e || 'なし（自然に）' })), d.emotion, (v) => this.set({ emotion: v }));
+    const speedSel = select(Object.entries(SPEEDS).map(([value, label]) => ({ value, label })), d.speed, (v) => this.set({ speed: v }));
+    const intoSel = select(Object.entries(INTONATIONS).map(([value, label]) => ({ value, label })), d.intonation, (v) => this.set({ intonation: v }));
+    const styleInput = h('input', { value: d.style, list: 'stylePresets', placeholder: '例: 語尾をやわらかく、親しみやすく / ニュースのように', oninput: (e) => this.set({ style: e.target.value }) });
+    add(this.root,
       h('div', { class: 'stack' },
-        h('div', { class: 'section-title' }, '③ 声'),
-        h('label', { class: 'field' }, '音声合成モデル（Gemini TTS）', select(ttsOpts, ttsCurrent, (v) => this.set({ ttsModel: v }))),
-        h('div', { class: 'grid2' },
-          h('label', { class: 'field' }, 'ボイス', select(TTS_VOICES.map(([v, desc]) => ({ value: v, label: `${v}（${desc}）` })), d.voice, (v) => this.set({ voice: v }))),
-          h('label', { class: 'field' }, '話し方', styleInput, h('datalist', { id: 'stylePresets' }, STYLE_PRESETS.map((s) => h('option', { value: s })))),
+        h('div', { class: 'section-title' }, '③ 声と話し方'),
+        h('label', { class: 'field' }, 'ボイス', select(voiceOpts, d.voice, (v) => this.set({ voice: v }, true))),
+        h('div', { class: 'row wrap' },
+          h('button', { class: 'btn sm', onclick: () => previewVoice(this.d.voice, { style: composeStyle(this.d), model: this.d.ttsModel || store.settings.ttsModel }) }, '▶ 試聴'),
+          h('button', { class: 'btn sm', onclick: () => openCopyVoice(this.target().seg?.item?.hasAudio ? this.target().seg.item.id : undefined) }, '🎤 声をコピー'),
+          h('button', { class: 'btn sm', onclick: () => openDesignVoice() }, '🎨 声をデザイン'),
+          h('button', { class: 'btn sm ghost', onclick: () => openVoiceManager() }, 'マイボイスの管理'),
         ),
+        isCustom ? h('div', { class: 'tiny' }, 'マイボイスは Gemini 3.8 TTS 以降で読み上げます（古いモデルを選んでいても自動で切り替えます）。') : null,
+        h('div', { class: 'grid2' },
+          h('label', { class: 'field' }, '感情', emotionSel),
+          h('label', { class: 'field' }, '話す速さ', speedSel),
+        ),
+        h('div', { class: 'grid2' },
+          h('label', { class: 'field' }, '抑揚', intoSel),
+          h('label', { class: 'field' }, '音声合成モデル', select(ttsOpts, ttsCurrent, (v) => this.set({ ttsModel: v }))),
+        ),
+        h('label', { class: 'field' }, '演技の指示（自由入力）', styleInput, h('datalist', { id: 'stylePresets' }, STYLE_PRESETS.map((x) => h('option', { value: x })))),
+        h('div', { class: 'tiny' }, '感情・速さ・抑揚・演技の指示は、まとめて「話し方」として音声合成に渡されます。原稿の文章は、そのまま読み上げられます。'),
       ),
     );
 
@@ -222,6 +277,26 @@ export class NarrationPanel {
     this.estimateEl.textContent = this.d.script.trim() ? `${n} · 読み上げ目安 約 ${est.toFixed(1)} 秒${t.duration ? ` / 目標 ${t.duration.toFixed(1)} 秒${diff > 1.3 ? '（長め：速度調整か原稿の自動調整が入ります）' : ''}` : ''}` : t.duration ? `目標 ${t.duration.toFixed(1)} 秒 ≈ ${this.d.language === 'en' ? `${Math.round(t.duration * 2.6)} words` : `${Math.round(t.duration * 6)} 文字`}` : '';
   }
 
+  async transcribe() {
+    const t = this.target();
+    if (t.kind !== 'clip' || !t.seg) return toast('タイムラインで、話している動画のクリップを選択してください', 'warn');
+    if (!t.seg.item?.hasAudio) return toast('このクリップには音声がありません', 'warn');
+    this.transcribeBtn.disabled = true;
+    this.transcribeBtn.textContent = '文字起こし中…';
+    try {
+      const r = await api.post('/api/narration/transcribe', { itemId: t.seg.item.id, start: t.seg.clip.in, duration: t.duration, language: this.d.language, model: store.settings.textModel });
+      this.scriptEl.value = r.text;
+      this.set({ script: r.text });
+      this.updateEstimate();
+      toast('元の音声を文字にしました。言葉を書き換えてから「ナレーションを生成」を押してください。', 'ok');
+    } catch (e) {
+      toast(e.message, 'err');
+    } finally {
+      this.transcribeBtn.disabled = false;
+      this.transcribeBtn.textContent = '📝 元の音声を文字起こし';
+    }
+  }
+
   async writeScript() {
     const t = this.target();
     if (!t.duration) return toast(t.kind === 'clip' ? 'タイムラインで動画クリップを選択してください' : '長さが 0 秒です', 'warn');
@@ -232,7 +307,7 @@ export class NarrationPanel {
         target: t.kind,
         duration: t.duration,
         language: this.d.language,
-        style: this.d.style,
+        style: composeStyle(this.d),
         instruction: this.d.instruction,
         model: store.settings.textModel,
         analyze: this.d.analyze,
@@ -264,9 +339,10 @@ export class NarrationPanel {
         script: this.d.script,
         targetDuration: t.duration,
         voice: this.d.voice,
+        voiceName: voiceLabel(this.d.voice),
         ttsModel: this.d.ttsModel || store.settings.ttsModel,
         textModel: store.settings.textModel,
-        style: this.d.style,
+        style: composeStyle(this.d),
         language: this.d.language,
         fit: this.d.fit ? 'stretch' : 'none',
         autoRewrite: this.d.autoRewrite,

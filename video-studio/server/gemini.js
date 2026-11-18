@@ -28,7 +28,10 @@ let cachedKey = null;
 export function client() {
   const key = requireKey();
   if (!cachedClient || cachedKey !== key) {
-    cachedClient = new GoogleGenAI({ apiKey: key });
+    // GEMINI_API_BASE はテスト用（模擬サーバーに向ける）
+    const base = process.env.GEMINI_API_BASE ? new URL(process.env.GEMINI_API_BASE).origin : null;
+    // SDK 3.x の既定は v1。音声合成・動画生成などの新機能は v1beta にあるため明示する
+    cachedClient = new GoogleGenAI({ apiKey: key, apiVersion: 'v1beta', httpOptions: { apiVersion: 'v1beta', ...(base ? { baseUrl: base } : {}) } });
     cachedKey = key;
   }
   return cachedClient;

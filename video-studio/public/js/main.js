@@ -9,6 +9,7 @@ import { GeneratePanel } from './panels/generate.js';
 import { LibraryPanel } from './panels/library.js';
 import { NarrationPanel } from './panels/narration.js';
 import { openExport, openSettings } from './dialogs.js';
+import { loadVoices } from './voices.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -145,6 +146,7 @@ async function init() {
 
   timeline.render();
   setTimeout(() => timeline.fit(), 50);
+  loadVoices();
   if (!status.settings.hasApiKey && !status.demo) {
     toast('はじめに右上の「⚙ 設定」で Gemini API キーを入力してください（お試しはデモモードで可能）', 'warn', 9000);
   }

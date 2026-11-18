@@ -12,9 +12,10 @@ import { addMedia, deleteItem, getItem, listLibrary, updateItem } from './media.
 import { deleteJob, getJob, listJobs } from './jobs.js';
 import { startGeneration } from './videogen.js';
 import { createPrompt } from './assist.js';
-import { generateNarration, writeScript } from './narration.js';
+import { generateNarration, writeScript, transcribe, synthesize, resolveTtsModel } from './narration.js';
+import { CONSENT_STATEMENTS, deleteVoice, describeVoice, designVoice, listVoices, renameVoice, replicateVoice, syncVoices } from './voices.js';
 import { FORMATS, renderProxy, startExport } from './export.js';
-import { readJson, writeJson } from './util.js';
+import { HttpError, newId, readJson, writeJson } from './util.js';
 import { newProject } from '../public/js/shared/timeline-core.js';
 
 const app = express();
@@ -30,7 +31,8 @@ const h = (fn) => async (req, res) => {
     if (!res.headersSent) res.json(r ?? { ok: true });
   } catch (e) {
     console.error(`[${req.method} ${req.path}]`, e?.message || e);
-    if (!res.headersSent) res.status(e.status && e.status < 600 && e.status >= 400 ? e.status : 500).json({ error: friendlyError(e) });
+    const message = e instanceof HttpError || e.friendly ? e.message : friendlyError(e);
+    if (!res.headersSent) res.status(e.status && e.status < 600 && e.status >= 400 ? e.status : 500).json({ error: message });
   }
 };
 
@@ -137,6 +139,48 @@ app.post(
 );
 app.post('/api/narration/generate', h(async (req) => generateNarration(req.body || {})));
 
+app.post(
+  '/api/narration/transcribe',
+  h(async (req) => ({ text: await transcribe({ ...req.body, model: req.body?.model }) })),
+);
+
+// ---- マイボイス（声のコピー・デザイン） ----
+const voiceUpload = upload.fields([{ name: 'source', maxCount: 1 }, { name: 'consent', maxCount: 1 }]);
+const voiceFields = (req) => ({
+  name: req.body.name,
+  language: req.body.language,
+  sourceItemId: req.body.sourceItemId || undefined,
+  start: Number(req.body.start) || 0,
+  duration: Number(req.body.duration) || 20,
+  denoise: req.body.denoise === '1' || req.body.denoise === 'true',
+  sourceFile: req.files?.source?.[0],
+  consentFile: req.files?.consent?.[0],
+});
+app.get('/api/voices', h(() => ({ voices: listVoices(), consent: CONSENT_STATEMENTS })));
+app.post('/api/voices/replicate', voiceUpload, h(async (req) => ({ voice: await replicateVoice(voiceFields(req)) })));
+app.post('/api/voices/describe', voiceUpload, h(async (req) => ({ description: await describeVoice(voiceFields(req)) })));
+app.post('/api/voices/design', h(async (req) => ({ voice: await designVoice(req.body || {}) })));
+app.post('/api/voices/sync', h(async () => ({ voices: await syncVoices() })));
+app.patch('/api/voices/:id', h((req) => ({ voice: renameVoice(req.params.id, req.body?.name) })));
+app.delete('/api/voices/:id', h(async (req) => ({ ok: await deleteVoice(req.params.id) })));
+
+/** 声の試聴（短い文を読み上げる） */
+app.post(
+  '/api/tts/preview',
+  h(async (req) => {
+    const b = req.body || {};
+    const warnings = [];
+    const model = resolveTtsModel(b.model || getSettings().ttsModel, b.voice, warnings);
+    const text = String(b.text || '').trim() || (b.language === 'en' ? 'Hello. This is how this voice sounds.' : 'こんにちは。この声でナレーションを読み上げます。');
+    const file = await synthesize({ text: text.slice(0, 300), model, voice: b.voice, style: b.style, language: b.language });
+    const dir = path.join(DIRS.data, 'voices');
+    for (const f of fs.readdirSync(dir)) if (f.startsWith('preview_')) fs.rm(path.join(dir, f), { force: true }, () => {});
+    const name = `preview_${newId()}${path.extname(file)}`;
+    fs.renameSync(file, path.join(dir, name));
+    return { url: `/voices/${name}`, warnings, model };
+  }),
+);
+
 // ---- プロジェクト ----
 const PROJECT_FILE = path.join(DIRS.data, 'project.json');
 app.get('/api/project', h(() => ({ project: readJson(PROJECT_FILE, null) || newProject() })));
@@ -155,6 +199,7 @@ app.post('/api/export', h((req) => ({ job: startExport(req.body.project, req.bod
 // ---- 静的ファイル ----
 app.use('/media', express.static(DIRS.media, { maxAge: '1h' }));
 app.use('/uploads', express.static(DIRS.uploads, { maxAge: '1h' }));
+app.use('/voices', express.static(path.join(DIRS.data, 'voices')));
 app.get('/exports/:file', (req, res) => {
   const file = path.join(DIRS.exports, path.basename(req.params.file));
   if (!fs.existsSync(file)) return res.status(404).send('not found');
