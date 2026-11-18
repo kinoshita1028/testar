@@ -6,6 +6,7 @@ import { fileToPart, generateText, rest } from './gemini.js';
 import { probe, runFfmpeg } from './ffmpeg.js';
 import { getItem, mediaPath } from './media.js';
 import { newId, readJson, writeJson, HttpError } from './util.js';
+import { isolateVoiceFile, separateItem } from './stems.js';
 
 const VOICE_DIR = path.join(DIRS.data, 'voices');
 fs.mkdirSync(VOICE_DIR, { recursive: true });
@@ -48,16 +49,30 @@ async function toWav(src, out, { start = 0, duration, denoise = false } = {}) {
  * 元の声（アップロード or ライブラリ）を切り出して WAV にする。
  * loopTo を指定すると、切り出した部分が短いときに、短い間をはさんでくり返しつなげて loopTo 秒のサンプルにする。
  */
-async function prepareSource({ sourceFile, sourceItemId, start, duration, denoise, loopTo }) {
+async function prepareSource({ sourceFile, sourceItemId, start, duration, denoise, loopTo, isolate }) {
   let src = sourceFile?.path;
   let label = sourceFile ? Buffer.from(sourceFile.originalname, 'latin1').toString('utf8') : null;
+  let tmpIsolated = null;
   if (!src && sourceItemId) {
     const item = getItem(sourceItemId);
     if (!item) throw new HttpError(400, 'ライブラリの素材が見つかりません');
     src = mediaPath(item);
     label = item.name;
+    // BGM・効果音を取り除いた「声だけ」を使う（結果はライブラリに保存して再利用）
+    if (isolate) src = mediaPath((await separateItem(item.id)).voice);
+  } else if (src && isolate) {
+    tmpIsolated = await isolateVoiceFile(src);
+    src = tmpIsolated;
   }
   if (!src) throw new HttpError(400, '元になる声（動画か音声）を選んでください');
+  try {
+    return await prepareSourceFrom(src, label, { start, duration, denoise, loopTo });
+  } finally {
+    if (tmpIsolated) fs.rm(tmpIsolated, { force: true }, () => {});
+  }
+}
+
+async function prepareSourceFrom(src, label, { start, duration, denoise, loopTo }) {
   const target = Math.min(30, Math.max(0, Number(loopTo) || 0));
   const out = path.join(DIRS.tmp, `${newId('vsrc_')}.wav`);
   const len = await toWav(src, out, { start: Number(start) || 0, duration: Math.min(30, Math.max(target ? 0.5 : 3, Number(duration) || 20)), denoise });
@@ -93,11 +108,11 @@ function keepSample(id, wav) {
 /**
  * 声をコピーする（本人の同意の録音が必須）
  */
-export async function replicateVoice({ name, language = 'ja-JP', sourceFile, sourceItemId, start, duration, denoise, consentFile, loopTo }) {
+export async function replicateVoice({ name, language = 'ja-JP', sourceFile, sourceItemId, start, duration, denoise, consentFile, loopTo, isolate }) {
   if (!consentFile) throw new HttpError(400, '本人の同意の録音がありません');
   const tmp = [];
   try {
-    const src = await prepareSource({ sourceFile, sourceItemId, start, duration, denoise, loopTo });
+    const src = await prepareSource({ sourceFile, sourceItemId, start, duration, denoise, loopTo, isolate });
     tmp.push(src.wav);
     const consentWav = path.join(DIRS.tmp, `${newId('vcon_')}.wav`);
     tmp.push(consentWav);
@@ -145,9 +160,9 @@ export async function replicateVoice({ name, language = 'ja-JP', sourceFile, sou
 }
 
 /** 声の特徴を AI が文章にする（声のデザイン用） */
-export async function describeVoice({ sourceFile, sourceItemId, start, duration, denoise, loopTo }) {
+export async function describeVoice({ sourceFile, sourceItemId, start, duration, denoise, loopTo, isolate }) {
   if (isDemo()) return '（デモ）30代の落ち着いた声。やや低めで、やわらかく、ゆっくりはっきり話す。';
-  const src = await prepareSource({ sourceFile, sourceItemId, start, duration, denoise, loopTo });
+  const src = await prepareSource({ sourceFile, sourceItemId, start, duration, denoise, loopTo, isolate });
   try {
     const text = await generateText({
       model: getSettings().textModel,

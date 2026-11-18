@@ -70,7 +70,7 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .btn.ghost:hover { background: var(--bg3); color: var(--text); }
 .btn.danger { color: var(--err); }
 .btn.sm { padding: 3px 8px; font-size: 12px; border-radius: 6px; }
-.btn.block { width: 100%; justify-content: center; }
+.btn.block { width: 100%; justify-content: center; white-space: normal; text-align: center; }
 .btn.big { padding: 10px 14px; font-size: 14px; }
 .icon-btn {
   border: 1px solid transparent; background: transparent; border-radius: 8px;

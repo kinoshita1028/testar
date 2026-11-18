@@ -167,6 +167,7 @@ function sourcePicker(st, onChange) {
       h('div', { class: 'row wrap' },
         h('button', { class: 'btn sm', onclick: () => { st.start = Math.floor(audio.currentTime * 10) / 10; startInput.value = st.start; } }, '⏱ いまの再生位置を開始にする'),
         h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.denoise, onchange: (e) => (st.denoise = e.target.checked) }), '雑音を軽くする'),
+        h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.isolate, onchange: (e) => (st.isolate = e.target.checked) }), 'BGM・効果音を取り除いて声だけを使う（AI で分離）'),
       ),
       h('div', { class: 'tiny' }, '1 人だけが話していて、BGM や効果音が少ない部分を選ぶと、きれいにコピーできます。'),
     );
@@ -186,6 +187,7 @@ function appendSource(fd, st) {
   fd.append('start', String(st.start || 0));
   fd.append('duration', String(st.duration || 20));
   fd.append('denoise', st.denoise ? '1' : '0');
+  if (st.isolate) fd.append('isolate', '1');
 }
 
 // ------------------------------------------------------------------ 同意の録音

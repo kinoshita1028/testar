@@ -33,6 +33,7 @@ export function openVoiceEdit(item, opts = {}) {
     fit: true,
     autoRewrite: false,
     keepVolume: 0,
+    keepBackground: true,
     replaceClip: Boolean(opts.clipId),
   };
 
@@ -161,6 +162,7 @@ export function openVoiceEdit(item, opts = {}) {
   const keepRange = h('input', { type: 'range', min: 0, max: 0.5, step: 0.05, value: 0 });
   keepRange.addEventListener('input', () => { st.keepVolume = Number(keepRange.value); keepOut.textContent = `${Math.round(st.keepVolume * 100)}%`; });
   const usedClips = store.project.videoClips.filter((c) => c.itemId === item.id);
+  const keepField = h('label', { class: 'field hidden' }, '範囲内に元の音（声も BGM も）を残す音量', h('div', { class: 'slider-row' }, keepRange, keepOut));
 
   const status = h('div', { class: 'small' });
   const resultBox = h('div', { class: 'stack' });
@@ -194,7 +196,8 @@ export function openVoiceEdit(item, opts = {}) {
     h('div', { class: 'section-title' }, '④ 仕上げ'),
     h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.fit, onchange: (e) => (st.fit = e.target.checked) }), '読む速さを自動調整して、選んだ範囲の長さに合わせる'),
     h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.autoRewrite, onchange: (e) => (st.autoRewrite = e.target.checked) }), '長さが大きく合わないときは、AI が言い回しを少し変えてよい'),
-    h('label', { class: 'field' }, '範囲内に元の音（BGM など）を残す音量', h('div', { class: 'slider-row' }, keepRange, keepOut)),
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: st.keepBackground, onchange: (e) => { st.keepBackground = e.target.checked; keepField.classList.toggle('hidden', st.keepBackground); } }), 'BGM・効果音はそのまま残して、声だけを差し替える（AI で声と BGM を分けてから処理します。声のコピーにも BGM を除いた声を使います）'),
+    keepField,
     usedClips.length
       ? h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: true, onchange: (e) => (st.replaceClip = e.target.checked) }), `タイムラインでこの動画を使っている ${usedClips.length} 個のクリップを、差し替え版に置き換える`)
       : null,
@@ -217,6 +220,14 @@ export function openVoiceEdit(item, opts = {}) {
       let voice = st.voice;
       let voiceName = voice;
 
+      // 0) BGM を残す場合は、先に声と BGM を分けておく（結果は再利用される）
+      if (st.keepBackground) {
+        status.textContent = '⓪ 声と BGM を分けています…';
+        const { separateWithProgress } = await import('./stems.js');
+        const sep = await separateWithProgress(item);
+        if (!sep) throw new Error('声と BGM を分けられなかったため中止しました。「BGM・効果音はそのまま残す」を外すと、分けずに処理できます。');
+      }
+
       // 1) 声を用意する
       if (st.mode === 'copy' || st.mode === 'design') {
         const fd = new FormData();
@@ -224,6 +235,7 @@ export function openVoiceEdit(item, opts = {}) {
         fd.append('start', String(st.start));
         fd.append('duration', String(st.end - st.start));
         fd.append('loopTo', String(st.loopTo));
+        if (st.keepBackground) fd.append('isolate', '1');
         if (st.mode === 'copy') {
           if (!st.consent) throw new Error('本人の同意の録音がありません');
           status.textContent = '① この部分の声をコピーしています…';
@@ -265,6 +277,7 @@ export function openVoiceEdit(item, opts = {}) {
         fit: st.fit,
         autoRewrite: st.autoRewrite,
         keepVolume: st.keepVolume,
+        keepBackground: st.keepBackground,
       });
       await store.refreshLibrary();
       const newItem = store.itemsById[r.item.id] || r.item;

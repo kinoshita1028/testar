@@ -135,6 +135,12 @@ export class Inspector {
       h('label', { class: 'field' }, 'フェードイン', this.slider({ min: 0, max: 3, step: 0.1, value: clip.fadeIn || 0, format: (v) => `${v.toFixed(1)}s`, onInput: (v) => (clip.fadeIn = v) })),
       h('label', { class: 'field' }, 'フェードアウト', this.slider({ min: 0, max: 3, step: 0.1, value: clip.fadeOut || 0, format: (v) => `${v.toFixed(1)}s`, onInput: (v) => (clip.fadeOut = v) })),
       h('div', { class: 'section-title' }, '操作'),
+      item?.kind === 'video' && item.hasAudio
+        ? h('div', { class: 'stack' },
+            h('button', { class: 'btn block', title: '音声を別の音声クリップに切り離します（映像に連動）', onclick: async () => (await import('./stems.js')).detachAudio(clip) }, '🔊 映像と音声を分ける'),
+            h('button', { class: 'btn block', title: 'AI で「声」と「BGM・効果音」に分けて、別々のトラックに置きます', onclick: async () => (await import('./stems.js')).separateClip(clip) }, '🎚 声と BGM を分ける'),
+          )
+        : null,
       h('button', { class: 'btn block', onclick: () => store.emit('narr:target', clip.id) || store.emit('ui:tab', 'narration') }, '🎙 このクリップにナレーションを付ける'),
       item?.kind === 'video' && item.hasAudio
         ? h('button', {
@@ -145,7 +151,7 @@ export class Inspector {
               const at = seg && store.time >= seg.start && store.time <= seg.end ? clip.in + (store.time - seg.start) : clip.in;
               openVoiceEdit(item, { clipId: clip.id, start: Math.max(clip.in, at - 1), end: Math.min(clip.out, at + 2) });
             },
-          }, '🎙 一部のセリフを差し替え（その部分の声で）')
+          }, '🎙 一部のセリフを差し替え')
         : null,
       h('div', { class: 'grid2' },
         h('button', { class: 'btn', onclick: () => store.splitAt() }, '✂ 分割'),

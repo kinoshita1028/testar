@@ -77,3 +77,28 @@ test('Omni の最大秒数はモデルごとに異なる（1.2 以降は 15 秒�
   assert.equal(effectiveMaxDuration(prof, [{ kind: 'image', role: 'first' }]), 10);
   assert.equal(effectiveMaxDuration(modelProfile('veo-3.1-generate-preview'), []), 8);
 });
+
+test('声と BGM の分離に使う FFT が正しく計算できる', async () => {
+  const { _internal } = await import('../server/separate.js');
+  const N = 7680;
+  const b = new _internal.Bluestein(N);
+  const xr = Float64Array.from({ length: N }, (_, i) => Math.sin(i * 0.3) + 0.5 * Math.cos(i * 1.7));
+  const xi = new Float64Array(N);
+  const Xr = new Float64Array(N);
+  const Xi = new Float64Array(N);
+  b.dft(xr, xi, Xr, Xi);
+  for (const k of [0, 7, 1234]) {
+    let sr = 0;
+    let si = 0;
+    for (let n = 0; n < N; n++) {
+      const a = (-2 * Math.PI * ((n * k) % N)) / N;
+      sr += xr[n] * Math.cos(a);
+      si += xr[n] * Math.sin(a);
+    }
+    assert.ok(Math.hypot(sr - Xr[k], si - Xi[k]) < 1e-8);
+  }
+  const yr = new Float64Array(N);
+  const yi = new Float64Array(N);
+  b.idft(Xr, Xi, yr, yi);
+  for (let n = 0; n < N; n += 997) assert.ok(Math.abs(yr[n] - xr[n]) < 1e-9);
+});

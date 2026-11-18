@@ -5,7 +5,7 @@ import { h, clear, toast, segmented, confirmDialog, lsGet, lsSet, add } from '..
 import { openPreview } from '../dialogs.js';
 import { formatTime } from '../shared/timeline-core.js';
 
-const SRC_LABEL = { generated: ['AI', 'ai'], narration: ['ナレ', 'narr'], upload: ['読込', ''] };
+const SRC_LABEL = { generated: ['AI', 'ai'], narration: ['ナレ', 'narr'], upload: ['読込', ''], separated: ['分離', 'narr'] };
 
 export async function deleteLibraryItem(item) {
   const used = store.project.videoClips.some((c) => c.itemId === item.id) || store.project.audioTracks.some((t) => t.clips.some((c) => c.itemId === item.id));

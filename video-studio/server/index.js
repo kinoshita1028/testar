@@ -14,6 +14,8 @@ import { startGeneration } from './videogen.js';
 import { createPrompt } from './assist.js';
 import { generateNarration, writeScript, transcribe, synthesize, resolveTtsModel } from './narration.js';
 import { applyVoiceEdit } from './voiceedit.js';
+import { extractAudio, startSeparation } from './stems.js';
+import { separationStatus } from './separate.js';
 import { CONSENT_STATEMENTS, deleteVoice, describeVoice, designVoice, listVoices, renameVoice, replicateVoice, syncVoices } from './voices.js';
 import { FORMATS, renderProxy, startExport } from './export.js';
 import { HttpError, newId, readJson, writeJson } from './util.js';
@@ -155,6 +157,7 @@ const voiceFields = (req) => ({
   duration: Number(req.body.duration) || 20,
   denoise: req.body.denoise === '1' || req.body.denoise === 'true',
   loopTo: Number(req.body.loopTo) || 0,
+  isolate: req.body.isolate === '1' || req.body.isolate === 'true',
   sourceFile: req.files?.source?.[0],
   consentFile: req.files?.consent?.[0],
 });
@@ -165,6 +168,11 @@ app.post('/api/voices/design', h(async (req) => ({ voice: await designVoice(req.
 app.post('/api/voices/sync', h(async () => ({ voices: await syncVoices() })));
 app.patch('/api/voices/:id', h((req) => ({ voice: renameVoice(req.params.id, req.body?.name) })));
 app.delete('/api/voices/:id', h(async (req) => ({ ok: await deleteVoice(req.params.id) })));
+
+// ---- 映像と音声を分ける／声と BGM を分ける ----
+app.get('/api/separate/status', h(() => separationStatus()));
+app.post('/api/media/:id/extract-audio', h(async (req) => extractAudio(req.params.id)));
+app.post('/api/media/:id/separate', h((req) => ({ job: startSeparation(req.params.id, { highQuality: Boolean(req.body?.highQuality) }) })));
 
 /** 声の部分差し替え（指定区間だけミュートして新しいセリフを重ねた動画を作る） */
 app.post('/api/voice-edit/apply', h(async (req) => applyVoiceEdit(req.body || {})));

@@ -22,6 +22,7 @@
   },
   "optionalDependencies": {
     "ffmpeg-static": "^5.3.0",
-    "ffprobe-static": "^3.1.0"
+    "ffprobe-static": "^3.1.0",
+    "onnxruntime-node": "^1.31.1"
   }
 }

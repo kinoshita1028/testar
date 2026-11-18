@@ -6,6 +6,7 @@ import { probe, runFfmpeg } from './ffmpeg.js';
 import { addMedia, getItem, mediaPath } from './media.js';
 import { generateNarration } from './narration.js';
 import { newId, HttpError } from './util.js';
+import { separateItem } from './stems.js';
 
 const f3 = (n) => Number(n).toFixed(3);
 
@@ -42,12 +43,26 @@ export async function applyVoiceEdit(p) {
   const delay = Math.round(start * 1000);
   const speech = mediaPath(narr.item);
   const out = path.join(DIRS.tmp, `${newId('vedit_')}.mp4`);
-  const graph = item.hasAudio
-    ? `[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume='${vol}':eval=frame[a0];` +
-      `[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=${delay}|${delay}[a1];` +
-      '[a0][a1]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]'
-    : `[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,adelay=${delay}|${delay},apad[aout]`;
-  const common = ['-i', mediaPath(item), '-i', speech, '-filter_complex', graph, '-map', '0:v:0', '-map', '[aout]'];
+  const fmt = 'aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo';
+  const inputs = ['-i', mediaPath(item), '-i', speech];
+  let graph;
+  if (item.hasAudio && p.keepBackground) {
+    // 声と BGM を分けて、範囲内は「声だけ」を消す（BGM・効果音はそのまま）
+    const stems = await separateItem(item.id);
+    inputs.push('-i', mediaPath(stems.voice), '-i', mediaPath(stems.background));
+    graph =
+      `[2:a]${fmt},volume='${vol}':eval=frame[v];[3:a]${fmt}[bg];` +
+      `[1:a]${fmt},adelay=${delay}|${delay}[s];` +
+      '[v][bg][s]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[aout]';
+  } else if (item.hasAudio) {
+    graph =
+      `[0:a]${fmt},volume='${vol}':eval=frame[a0];` +
+      `[1:a]${fmt},adelay=${delay}|${delay}[a1];` +
+      '[a0][a1]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]';
+  } else {
+    graph = `[1:a]${fmt},adelay=${delay}|${delay},apad[aout]`;
+  }
+  const common = [...inputs, '-filter_complex', graph, '-map', '0:v:0', '-map', '[aout]'];
   const tail = ['-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-t', f3(item.duration), out];
   try {
     // 映像はそのままコピー（画質が落ちない・速い）
@@ -70,7 +85,7 @@ export async function applyVoiceEdit(p) {
     meta: {
       ...baseMeta,
       parentItemId: item.id,
-      voiceEdit: { start, end, script: narr.script, voice: p.voice, voiceName: p.voiceName || p.voice, style: p.style || '', narrationItemId: narr.item.id },
+      voiceEdit: { start, end, script: narr.script, voice: p.voice, voiceName: p.voiceName || p.voice, style: p.style || '', narrationItemId: narr.item.id, keptBackground: Boolean(p.keepBackground) },
     },
   });
   return { item: newItem, narration: narr.item, script: narr.script, tempo: narr.tempo, rawDuration: narr.rawDuration, finalDuration: narr.finalDuration, warnings: narr.warnings };

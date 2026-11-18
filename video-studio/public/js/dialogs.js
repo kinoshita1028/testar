@@ -50,6 +50,12 @@ export function openPreview(item) {
       h('a', { class: 'btn', href: item.url, download: `${item.name}${item.file.slice(item.file.lastIndexOf('.'))}` }, '⬇ ダウンロード'),
       h('button', { class: 'btn', onclick: () => { store.emit('gen:attach-item', item); m.close(); } }, '📎 生成の参考に添付'),
       item.kind === 'video' && item.hasAudio
+        ? h('button', { class: 'btn', title: '音声だけを取り出してライブラリに入れます', onclick: async () => { const { extractAudioToLibrary } = await import('./stems.js'); await extractAudioToLibrary(item); } }, '🔊 音声だけ取り出す')
+        : null,
+      item.hasAudio && item.source !== 'separated'
+        ? h('button', { class: 'btn', title: 'AI で「声」と「BGM・効果音」の 2 つの音声に分けます', onclick: async () => { const { separateToLibrary } = await import('./stems.js'); m.close(); await separateToLibrary(item); } }, '🎚 声と BGM を分ける')
+        : null,
+      item.kind === 'video' && item.hasAudio
         ? h('button', { class: 'btn', title: '一部分だけセリフを差し替えます', onclick: async () => { const { openVoiceEdit } = await import('./voiceedit.js'); m.close(); openVoiceEdit(item); } }, '🎙 一部の声を差し替え')
         : null,
       item.hasAudio && item.source !== 'narration'
