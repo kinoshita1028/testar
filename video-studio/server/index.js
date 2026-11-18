@@ -91,6 +91,15 @@ app.post('/api/generate', h((req) => ({ job: startGeneration(req.body || {}) }))
 app.get('/api/jobs', h((req) => ({ jobs: listJobs(req.query.type) })));
 app.get('/api/jobs/:id', h((req) => ({ job: getJob(req.params.id) })));
 app.delete('/api/jobs/:id', h((req) => ({ ok: deleteJob(req.params.id) })));
+app.post(
+  '/api/jobs/:id/retry',
+  h((req) => {
+    const job = getJob(req.params.id);
+    if (!job?.request) throw Object.assign(new Error('この生成は再試行できません（古い履歴のため）。プロンプトを再利用してください。'), { status: 400 });
+    const count = Number(req.body?.count) || job.request.count || 1;
+    return { job: startGeneration({ ...job.request, count }) };
+  }),
+);
 
 // ---- プロンプト作成支援 ----
 app.post(

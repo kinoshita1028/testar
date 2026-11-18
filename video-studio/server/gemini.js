@@ -7,7 +7,7 @@ import { getApiKey } from './config.js';
 import { sleep } from './util.js';
 import { DEFAULT_TEXT_MODELS, DEFAULT_TTS_MODELS, DEFAULT_VIDEO_MODELS } from '../public/js/shared/capabilities.js';
 
-export const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+export const API_BASE = process.env.GEMINI_API_BASE || 'https://generativelanguage.googleapis.com/v1beta';
 
 export class ApiError extends Error {
   constructor(status, message, body) {

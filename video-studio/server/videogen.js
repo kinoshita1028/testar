@@ -185,14 +185,71 @@ async function pollInteraction(ctx, it) {
     break;
   }
   if (it.status && it.status !== 'completed' && !contents.some((c) => c.type === 'video')) {
-    const stepErr = (it.steps || []).map((s) => s.error?.message).filter(Boolean).join(' / ');
-    const errs = (it.errors || []).map((e) => e.message || JSON.stringify(e)).join(' / ');
-    throw new Error(`生成に失敗しました（status: ${it.status}）${stepErr || errs ? `: ${stepErr || errs}` : ''}`);
+    throw interactionFailure(it);
   }
   return { it, contents };
 }
 
+const RPC_CODES = { 1: 'CANCELLED', 2: 'UNKNOWN', 3: 'INVALID_ARGUMENT', 4: 'DEADLINE_EXCEEDED', 5: 'NOT_FOUND', 7: 'PERMISSION_DENIED', 8: 'RESOURCE_EXHAUSTED', 9: 'FAILED_PRECONDITION', 13: 'INTERNAL', 14: 'UNAVAILABLE', 16: 'UNAUTHENTICATED' };
+const TRANSIENT = new Set(['', 'UNKNOWN', 'INTERNAL', 'UNAVAILABLE', 'DEADLINE_EXCEEDED', 'UNAUTHENTICATED', 'CANCELLED']);
+
+/** base64 の動画データなどを除いた、調査用のレスポンス */
+function sanitize(obj) {
+  return JSON.stringify(obj, (k, v) => (k === 'data' && typeof v === 'string' && v.length > 200 ? `<${v.length} chars>` : v), 1).slice(0, 4000);
+}
+
+function explainFailure(code, message) {
+  if (/safety|blocked|policy|prohibit|responsible|celebrit|harm/i.test(message)) {
+    return '安全フィルタ（実在の人物・有名人・ブランド・暴力的な表現など）で止められた可能性があります。表現を言い換えて再試行してください。';
+  }
+  switch (code) {
+    case 'INVALID_ARGUMENT':
+    case 'FAILED_PRECONDITION':
+      return '入力がモデルに受け付けられませんでした。添付した動画・画像（形式・長さ・枚数）や、長さと解像度の組み合わせを見直してください（例: 添付を減らす、長さを短くする、解像度を 720p にする）。';
+    case 'PERMISSION_DENIED':
+      return 'API キーにこのモデルの利用権限がありません。課金の設定や、モデルが使える地域・プランかを確認してください。';
+    case 'RESOURCE_EXHAUSTED':
+      return '利用上限（レート制限・クォータ）に達しました。少し時間をおいてから再試行してください。';
+    default:
+      return 'Google 側で一時的に処理に失敗したものです。内容に問題がなくても起きることがあり、同じ内容でもう一度生成すると成功することが多いです（失敗した分は課金されません）。';
+  }
+}
+
+function interactionFailure(it) {
+  const errs = [...(it.errors || []), ...(it.steps || []).map((st) => st.error).filter(Boolean)];
+  const rawCode = errs.map((e) => e.code ?? e.status).find((c) => c !== undefined && c !== null);
+  const code = typeof rawCode === 'number' ? RPC_CODES[rawCode] || String(rawCode) : String(rawCode || '').toUpperCase();
+  const message = errs.map((e) => e.message).filter(Boolean).join(' / ');
+  console.error('[omni] interaction failed:', sanitize(it));
+  const err = new Error(
+    `生成に失敗しました（status: ${it.status}${code ? ` / code: ${code}` : ''}）\n原因の目安: ${explainFailure(code, message)}${message ? `\nAPI の応答: ${message}` : ''}`,
+  );
+  err.userMessage = err.message;
+  err.interactionFailed = true;
+  err.code = code;
+  err.transient = TRANSIENT.has(code) && !/safety|blocked|policy|prohibit/i.test(message);
+  err.detail = sanitize({ id: it.id, status: it.status, errors: it.errors, steps: (it.steps || []).filter((st) => st.error || st.type === 'model_output') });
+  return err;
+}
+
 async function omniGenerate(ctx) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await omniGenerateOnce(ctx, attempt);
+    } catch (e) {
+      if (e.interactionFailed && e.transient && attempt < 1) {
+        logJob(ctx.job, `Google 側の一時的な失敗（${e.code || 'code なし'}）のため、自動でもう一度生成します（失敗分は課金されません）`);
+        ctx.warnings.push(`1 回目は Google 側の一時的な失敗（${e.code || 'code なし'}）だったため、自動で再試行しました`);
+        await sleep(3000);
+        continue;
+      }
+      if (e.detail) ctx.job.errorDetail = e.detail;
+      throw e;
+    }
+  }
+}
+
+async function omniGenerateOnce(ctx, attempt = 0) {
   const { job, model, opts, editItem } = ctx;
   const rf = clean({
     type: 'video',
@@ -203,7 +260,8 @@ async function omniGenerate(ctx) {
   });
   const prevId = editItem?.meta?.interactionId && !String(editItem.meta.interactionId).startsWith('demo_') ? editItem.meta.interactionId : null;
   let input = await buildOmniInput(ctx, { includeSourceVideo: Boolean(editItem && !prevId) });
-  const base = { model, input, response_format: rf, background: true, ...(prevId ? { previous_interaction_id: prevId } : {}), ...(opts.extraParams || {}) };
+  const base = { model, input, response_format: rf, background: attempt === 0, ...(prevId ? { previous_interaction_id: prevId } : {}), ...(opts.extraParams || {}) };
+  if (!base.background) delete base.background;
 
   // パラメータ形式が受け付けられなかった場合の段階的フォールバック
   const variants = [
@@ -306,6 +364,7 @@ export function startGeneration(params) {
     },
     warnings: [...warnings],
     items: [],
+    request: { ...params, count },
   });
 
   return runJob(job, async () => {
@@ -329,9 +388,12 @@ export function startGeneration(params) {
 
     const settled = await Promise.allSettled(Array.from({ length: count }, (_, i) => runOne(i)));
     const outputs = settled.filter((s) => s.status === 'fulfilled').flatMap((s) => s.value);
-    const failures = settled.filter((s) => s.status === 'rejected').map((s) => friendlyError(s.reason));
+    const failures = settled.filter((s) => s.status === 'rejected').map((s) => s.reason?.userMessage || friendlyError(s.reason));
     if (!outputs.length) throw Object.assign(new Error(failures[0] || '生成に失敗しました'), { userMessage: failures[0] });
-    if (failures.length) job.warnings.push(`${failures.length} 本の生成に失敗しました: ${failures[0]}`);
+    if (failures.length) {
+      job.failedCount = failures.length;
+      job.warnings.push(`${count} 本中 ${failures.length} 本の生成に失敗しました（成功した分は下に表示）: ${failures[0]}`);
+    }
 
     logJob(job, 'ライブラリに保存中…');
     const baseName = (params.sceneTitle || prompt || 'AI動画').replace(/\s+/g, ' ').slice(0, 40);

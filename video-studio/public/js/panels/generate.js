@@ -401,6 +401,18 @@ export class GeneratePanel {
     }
   }
 
+  async retryJob(j, count) {
+    try {
+      const r = await api.post(`/api/jobs/${j.id}/retry`, count ? { count } : {});
+      this.jobs.unshift(r.job);
+      this.renderJobs();
+      this.pollSoon();
+      toast('もう一度生成しています…', 'ok');
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  }
+
   async loadJobs() {
     try {
       const r = await api.get('/api/jobs?type=generate');
@@ -428,7 +440,7 @@ export class GeneratePanel {
           if (j.status === 'done') {
             newItems = true;
             toast(`✅ 動画ができました（${j.items?.length || 0} 本）${j.params?.sceneTitle ? `: ${j.params.sceneTitle}` : ''}`, 'ok');
-          } else if (j.status === 'error') toast(`生成に失敗しました: ${j.error}`, 'err');
+          } else if (j.status === 'error') toast(`生成に失敗しました。詳しくは「生成結果」の欄を見てください。`, 'err');
         }
       }
       if (newItems) await store.refreshLibrary();
@@ -494,10 +506,17 @@ export class GeneratePanel {
       j.status === 'error'
         ? h('div', { class: 'stack' },
             h('div', { class: 'err-text small' }, j.error),
-            h('div', { class: 'row' }, h('button', { class: 'btn sm', onclick: () => { this.set({ prompt: j.prompt }); this.promptEl?.focus(); } }, 'プロンプトを再利用')),
+            h('div', { class: 'row wrap' },
+              j.request ? h('button', { class: 'btn sm primary', title: '同じ内容・同じ添付でもう一度生成します', onclick: () => this.retryJob(j) }, '↻ もう一度生成') : null,
+              h('button', { class: 'btn sm', onclick: () => { this.set({ prompt: j.prompt }); this.promptEl?.focus(); } }, 'プロンプトを再利用'),
+            ),
           )
         : null,
-      ...(j.warnings || []).map((w) => h('div', { class: 'tiny warn-text' }, `⚠ ${w}`)),
+      ...[...new Set(j.warnings || [])].map((w) => h('div', { class: 'tiny warn-text', style: { whiteSpace: 'pre-wrap' } }, `⚠ ${w}`)),
+      j.status === 'done' && j.failedCount && j.request
+        ? h('div', { class: 'row' }, h('button', { class: 'btn sm', onclick: () => this.retryJob(j, j.failedCount) }, `↻ 失敗した ${j.failedCount} 本を作り直す`))
+        : null,
+      j.errorDetail ? h('details', {}, h('summary', {}, '詳細（API の応答）'), h('pre', { class: 'tiny', style: { whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: '200px', overflow: 'auto', margin: 0 } }, j.errorDetail)) : null,
     );
     if (j.status === 'done') {
       const grid = h('div', { class: 'job-results' });
