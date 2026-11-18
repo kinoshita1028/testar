@@ -75,10 +75,30 @@ async function ensureModel(onProgress) {
 }
 
 let sessionPromise = null;
+
+/**
+ * 省メモリモード（クラウドの小さいサーバー向け）。
+ * 環境変数 SEPARATION_LOW_MEMORY=1 で有効。メモリの使い回し用の領域を確保しない・スレッドを減らす。
+ */
+export function lowMemoryMode() {
+  return process.env.SEPARATION_LOW_MEMORY === '1';
+}
+
+function sessionOptions() {
+  if (!lowMemoryMode()) return { graphOptimizationLevel: 'all' };
+  return {
+    graphOptimizationLevel: 'all',
+    enableCpuMemArena: false,
+    enableMemPattern: false,
+    executionMode: 'sequential',
+    intraOpNumThreads: Number(process.env.SEPARATION_THREADS) || 1,
+    interOpNumThreads: 1,
+  };
+}
 async function getSession(onProgress) {
   const ort = await loadOrt();
   const file = await ensureModel(onProgress);
-  sessionPromise ||= ort.InferenceSession.create(file, { graphOptimizationLevel: 'all' });
+  sessionPromise ||= ort.InferenceSession.create(file, sessionOptions());
   return { ort, session: await sessionPromise };
 }
 
