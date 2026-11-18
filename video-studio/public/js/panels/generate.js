@@ -545,6 +545,7 @@ export class GeneratePanel {
         h('button', { class: 'btn', onclick: () => openPreview(item) }, '▶ 見る'),
         isOmni ? h('button', { class: 'btn', title: 'この動画を指示で修正（Omni）', onclick: () => this.setEdit(item) }, '✎ 修正') : null,
         isVeo || isOmni ? h('button', { class: 'btn', title: 'この動画の続きを生成', onclick: () => this.setExtend(item) }, '⇥ 延長') : null,
+        item.hasAudio ? h('button', { class: 'btn', title: '一部分だけセリフを差し替える（その部分の声で読み直して重ねる）', onclick: async () => { const { openVoiceEdit } = await import('../voiceedit.js'); openVoiceEdit(item); } }, '🎙 声を差し替え') : null,
       ),
     );
   }

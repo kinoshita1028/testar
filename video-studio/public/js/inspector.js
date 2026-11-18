@@ -136,6 +136,17 @@ export class Inspector {
       h('label', { class: 'field' }, 'フェードアウト', this.slider({ min: 0, max: 3, step: 0.1, value: clip.fadeOut || 0, format: (v) => `${v.toFixed(1)}s`, onInput: (v) => (clip.fadeOut = v) })),
       h('div', { class: 'section-title' }, '操作'),
       h('button', { class: 'btn block', onclick: () => store.emit('narr:target', clip.id) || store.emit('ui:tab', 'narration') }, '🎙 このクリップにナレーションを付ける'),
+      item?.kind === 'video' && item.hasAudio
+        ? h('button', {
+            class: 'btn block',
+            title: '再生ヘッドの位置の前後を選んで、その部分のセリフだけ差し替えます',
+            onclick: async () => {
+              const { openVoiceEdit } = await import('./voiceedit.js');
+              const at = seg && store.time >= seg.start && store.time <= seg.end ? clip.in + (store.time - seg.start) : clip.in;
+              openVoiceEdit(item, { clipId: clip.id, start: Math.max(clip.in, at - 1), end: Math.min(clip.out, at + 2) });
+            },
+          }, '🎙 一部のセリフを差し替え（その部分の声で）')
+        : null,
       h('div', { class: 'grid2' },
         h('button', { class: 'btn', onclick: () => store.splitAt() }, '✂ 分割'),
         h('button', { class: 'btn', onclick: () => store.duplicateSelected() }, '⧉ 複製'),

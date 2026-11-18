@@ -44,8 +44,11 @@ async function toWav(src, out, { start = 0, duration, denoise = false } = {}) {
   return len;
 }
 
-/** 元の声（アップロード or ライブラリ）を切り出して WAV にする */
-async function prepareSource({ sourceFile, sourceItemId, start, duration, denoise }) {
+/**
+ * 元の声（アップロード or ライブラリ）を切り出して WAV にする。
+ * loopTo を指定すると、切り出した部分が短いときに、短い間をはさんでくり返しつなげて loopTo 秒のサンプルにする。
+ */
+async function prepareSource({ sourceFile, sourceItemId, start, duration, denoise, loopTo }) {
   let src = sourceFile?.path;
   let label = sourceFile ? Buffer.from(sourceFile.originalname, 'latin1').toString('utf8') : null;
   if (!src && sourceItemId) {
@@ -55,10 +58,26 @@ async function prepareSource({ sourceFile, sourceItemId, start, duration, denois
     label = item.name;
   }
   if (!src) throw new HttpError(400, '元になる声（動画か音声）を選んでください');
+  const target = Math.min(30, Math.max(0, Number(loopTo) || 0));
   const out = path.join(DIRS.tmp, `${newId('vsrc_')}.wav`);
-  const len = await toWav(src, out, { start: Number(start) || 0, duration: Math.min(30, Math.max(3, Number(duration) || 20)), denoise });
-  if (len < 3) throw new HttpError(400, `元の声が短すぎます（${len.toFixed(1)} 秒）。10〜30 秒くらい選んでください。`);
-  return { wav: out, seconds: len, label };
+  const len = await toWav(src, out, { start: Number(start) || 0, duration: Math.min(30, Math.max(target ? 0.5 : 3, Number(duration) || 20)), denoise });
+  if (!target) {
+    if (len < 3) throw new HttpError(400, `元の声が短すぎます（${len.toFixed(1)} 秒）。10〜30 秒くらい選んでください。`);
+    return { wav: out, seconds: len, label, looped: false };
+  }
+  if (len < 0.8) throw new HttpError(400, `選んだ部分が短すぎます（${len.toFixed(1)} 秒）。1 秒以上の発話を選んでください。`);
+  if (len >= target - 0.5) return { wav: out, seconds: len, label, looped: false };
+  // 足りない分は、0.3 秒の間をはさんでくり返しつなげる
+  const padded = path.join(DIRS.tmp, `${newId('vpad_')}.wav`);
+  const looped = path.join(DIRS.tmp, `${newId('vloop_')}.wav`);
+  try {
+    await runFfmpeg(['-i', out, '-af', 'apad=pad_dur=0.3', '-ac', '1', '-ar', '24000', '-sample_fmt', 's16', padded]);
+    await runFfmpeg(['-stream_loop', '-1', '-i', padded, '-t', String(target), '-ac', '1', '-ar', '24000', '-sample_fmt', 's16', looped]);
+  } finally {
+    fs.rm(out, { force: true }, () => {});
+    fs.rm(padded, { force: true }, () => {});
+  }
+  return { wav: looped, seconds: target, label, looped: true, originalSeconds: len };
 }
 
 function b64(file) {
@@ -74,11 +93,11 @@ function keepSample(id, wav) {
 /**
  * 声をコピーする（本人の同意の録音が必須）
  */
-export async function replicateVoice({ name, language = 'ja-JP', sourceFile, sourceItemId, start, duration, denoise, consentFile }) {
+export async function replicateVoice({ name, language = 'ja-JP', sourceFile, sourceItemId, start, duration, denoise, consentFile, loopTo }) {
   if (!consentFile) throw new HttpError(400, '本人の同意の録音がありません');
   const tmp = [];
   try {
-    const src = await prepareSource({ sourceFile, sourceItemId, start, duration, denoise });
+    const src = await prepareSource({ sourceFile, sourceItemId, start, duration, denoise, loopTo });
     tmp.push(src.wav);
     const consentWav = path.join(DIRS.tmp, `${newId('vcon_')}.wav`);
     tmp.push(consentWav);
@@ -110,7 +129,7 @@ export async function replicateVoice({ name, language = 'ja-JP', sourceFile, sou
       type: 'replicated',
       language,
       sampleUrl: keepSample(id.replace(/[^\w-]/g, '_'), src.wav),
-      source: { label: src.label, start: Number(start) || 0, seconds: src.seconds },
+      source: { label: src.label, start: Number(start) || 0, seconds: src.seconds, ...(src.looped ? { looped: true, originalSeconds: src.originalSeconds } : {}) },
       expireTime: created.expire_time || null,
       createdAt: new Date().toISOString(),
     };
@@ -126,9 +145,9 @@ export async function replicateVoice({ name, language = 'ja-JP', sourceFile, sou
 }
 
 /** 声の特徴を AI が文章にする（声のデザイン用） */
-export async function describeVoice({ sourceFile, sourceItemId, start, duration, denoise }) {
+export async function describeVoice({ sourceFile, sourceItemId, start, duration, denoise, loopTo }) {
   if (isDemo()) return '（デモ）30代の落ち着いた声。やや低めで、やわらかく、ゆっくりはっきり話す。';
-  const src = await prepareSource({ sourceFile, sourceItemId, start, duration, denoise });
+  const src = await prepareSource({ sourceFile, sourceItemId, start, duration, denoise, loopTo });
   try {
     const text = await generateText({
       model: getSettings().textModel,

@@ -311,3 +311,8 @@ details[open] > summary { margin-bottom: 8px; }
 @media (max-width: 1200px) {
   :root { --left-w: 340px; --right-w: 260px; }
 }
+
+/* ---------- 声の部分差し替え: 範囲選択バー ---------- */
+.range-bar { position: relative; height: 56px; border-radius: 8px; background: #10151d center/100% 80% no-repeat; border: 1px solid var(--line2); cursor: crosshair; touch-action: none; user-select: none; }
+.range-sel { position: absolute; top: 0; bottom: 0; background: rgba(255, 84, 112, 0.28); border-left: 2px solid #ff5470; border-right: 2px solid #ff5470; pointer-events: none; }
+.range-head { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; opacity: 0.8; pointer-events: none; }

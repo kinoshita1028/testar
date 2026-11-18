@@ -13,6 +13,7 @@ import { deleteJob, getJob, listJobs } from './jobs.js';
 import { startGeneration } from './videogen.js';
 import { createPrompt } from './assist.js';
 import { generateNarration, writeScript, transcribe, synthesize, resolveTtsModel } from './narration.js';
+import { applyVoiceEdit } from './voiceedit.js';
 import { CONSENT_STATEMENTS, deleteVoice, describeVoice, designVoice, listVoices, renameVoice, replicateVoice, syncVoices } from './voices.js';
 import { FORMATS, renderProxy, startExport } from './export.js';
 import { HttpError, newId, readJson, writeJson } from './util.js';
@@ -153,6 +154,7 @@ const voiceFields = (req) => ({
   start: Number(req.body.start) || 0,
   duration: Number(req.body.duration) || 20,
   denoise: req.body.denoise === '1' || req.body.denoise === 'true',
+  loopTo: Number(req.body.loopTo) || 0,
   sourceFile: req.files?.source?.[0],
   consentFile: req.files?.consent?.[0],
 });
@@ -163,6 +165,9 @@ app.post('/api/voices/design', h(async (req) => ({ voice: await designVoice(req.
 app.post('/api/voices/sync', h(async () => ({ voices: await syncVoices() })));
 app.patch('/api/voices/:id', h((req) => ({ voice: renameVoice(req.params.id, req.body?.name) })));
 app.delete('/api/voices/:id', h(async (req) => ({ ok: await deleteVoice(req.params.id) })));
+
+/** 声の部分差し替え（指定区間だけミュートして新しいセリフを重ねた動画を作る） */
+app.post('/api/voice-edit/apply', h(async (req) => applyVoiceEdit(req.body || {})));
 
 /** 声の試聴（短い文を読み上げる） */
 app.post(

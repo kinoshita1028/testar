@@ -14,7 +14,7 @@ export async function loadVoices() {
   }
 }
 
-async function postForm(url, fd) {
+export async function postForm(url, fd) {
   const res = await fetch(url, { method: 'POST', body: fd });
   let data = null;
   try {
@@ -189,7 +189,7 @@ function appendSource(fd, st) {
 }
 
 // ------------------------------------------------------------------ 同意の録音
-function consentRecorder(st) {
+export function consentRecorder(st) {
   const box = h('div', { class: 'stack' });
   const statements = store.consent || {};
   const textEl = h('div', { class: 'card', style: { fontSize: '15px', lineHeight: '1.7', background: 'var(--bg)' } });
